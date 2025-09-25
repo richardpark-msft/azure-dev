@@ -26,19 +26,21 @@ NSOperatingSystemVersion c_getVersion() {
 	}
 }
 */
-import "C"
+// import "C"
 
-import (
-	"fmt"
-)
+// import (
+// 	"fmt"
+// )
 
-func verToStr(ver C.NSOperatingSystemVersion) string {
-	res := fmt.Sprintf("%d.%d.%d", int(ver.majorVersion), int(ver.minorVersion), int(ver.patchVersion))
-	return res
-}
+// func verToStr(ver C.NSOperatingSystemVersion) string {
+// 	res := fmt.Sprintf("%d.%d.%d", int(ver.majorVersion), int(ver.minorVersion), int(ver.patchVersion))
+// 	return res
+// }
 
 func doGetVersion() string {
-	return verToStr(C.c_getVersion())
+	// return verToStr(C.c_getVersion())
+	// TODO: cgo is making it impossible for to cross-compile the extension for Mac.
+	return ""
 }
 
 func GetVersion() (string, error) {
