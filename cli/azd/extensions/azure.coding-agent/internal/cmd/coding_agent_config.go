@@ -32,6 +32,7 @@ import (
 
 	rm_armmsi "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	azd_armmsi "github.com/azure/azure-dev/cli/azd/pkg/armmsi"
+	"github.com/cli/browser"
 
 	_ "embed"
 )
@@ -508,4 +509,128 @@ func getGitRoot(ctx context.Context) (string, error) {
 	}
 
 	return gitRoot, nil
+}
+
+// GitPushChanges walks the user through committing changes and creating a pull request
+func GitPushChanges(ctx context.Context, prompter azdext.PromptServiceClient, repoSlug string) error {
+	// First, ask if they want to commit the changes
+	commitConfirm, err := prompter.Confirm(ctx, &azdext.ConfirmRequest{
+		Options: &azdext.ConfirmOptions{
+			Message: "Do you want to commit the workflow file and push changes to your repository?",
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	if !*commitConfirm.Value {
+		fmt.Printf("Skipped committing changes. You can manually run:\n")
+		fmt.Printf("   git add .github/workflows/copilot-setup-steps.yml\n")
+		fmt.Printf("   git commit -m \"add coding-agent workflow\"\n")
+		fmt.Printf("   git push\n")
+		return nil
+	}
+
+	gitRoot, err := getGitRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get git root: %w", err)
+	}
+
+	commandRunner := azdexec.NewCommandRunner(nil)
+
+	// Stage the workflow file
+	workflowFile := ".github/workflows/copilot-setup-steps.yml"
+	_, err = commandRunner.Run(ctx, azdexec.RunArgs{
+		Cmd:  "git",
+		Args: []string{"add", workflowFile},
+		Cwd:  gitRoot,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to stage workflow file: %w", err)
+	}
+
+	// Commit the changes
+	_, err = commandRunner.Run(ctx, azdexec.RunArgs{
+		Cmd:  "git",
+		Args: []string{"commit", "-m", "add coding-agent workflow"},
+		Cwd:  gitRoot,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to commit changes: %w", err)
+	}
+
+	// Ask if they want to push
+	pushConfirm, err := prompter.Confirm(ctx, &azdext.ConfirmRequest{
+		Options: &azdext.ConfirmOptions{
+			Message: "Do you want to push the changes to the remote repository?",
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	if *pushConfirm.Value {
+		// Push the changes
+		_, err = commandRunner.Run(ctx, azdexec.RunArgs{
+			Cmd:  "git",
+			Args: []string{"push"},
+			Cwd:  gitRoot,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to push changes: %w", err)
+		}
+
+		fmt.Printf("✅ Successfully pushed changes to repository!\n")
+
+		// Ask if they want to create a pull request
+		prConfirm, err := prompter.Confirm(ctx, &azdext.ConfirmRequest{
+			Options: &azdext.ConfirmOptions{
+				Message: "Do you want to open GitHub to create a pull request?",
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		if *prConfirm.Value {
+			prUrl := fmt.Sprintf("https://github.com/%s/compare", repoSlug)
+			err = browser.OpenURL(prUrl)
+			if err != nil {
+				fmt.Printf("Failed to open browser. Please visit: %s\n", prUrl)
+			} else {
+				fmt.Printf("Opening browser to create pull request: %s\n", prUrl)
+			}
+		}
+	} else {
+		fmt.Printf("Changes have been committed but not pushed. Run 'git push' when ready.\n")
+	}
+
+	return nil
+}
+
+// OpenBrowserToMCPConfig asks the user if they want to visit the MCP configuration URL and launches the browser
+func OpenBrowserToMCPConfig(ctx context.Context, prompter azdext.PromptServiceClient, url string) error {
+	// Ask if they want to visit the URL
+	visitConfirm, err := prompter.Confirm(ctx, &azdext.ConfirmRequest{
+		Options: &azdext.ConfirmOptions{
+			Message: fmt.Sprintf("Do you want to open your browser to visit the MCP configuration page?\n%s", url),
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	if *visitConfirm.Value {
+		err = browser.OpenURL(url)
+		if err != nil {
+			fmt.Printf("Failed to open browser. Please visit: %s\n", url)
+			return err
+		} else {
+			fmt.Printf("Opening browser to: %s\n", url)
+		}
+	} else {
+		fmt.Printf("You can visit the MCP configuration page manually: %s\n", url)
+	}
+
+	return nil
 }
