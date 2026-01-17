@@ -39,6 +39,7 @@ require (
 	github.com/buger/goterm v1.0.4
 	github.com/charmbracelet/glamour v0.10.0
 	github.com/cli/browser v1.3.0
+	github.com/coder/acp-go-sdk v0.6.3
 	github.com/denormal/go-gitignore v0.0.0-20180930084346-ae8ad1d07817
 	github.com/drone/envsubst v1.0.3
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
@@ -49,6 +50,7 @@ require (
 	github.com/golobby/container/v3 v3.3.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/invopop/jsonschema v0.13.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.41.1
 	github.com/mattn/go-colorable v0.1.14
@@ -113,7 +115,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
@@ -165,3 +166,13 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251007200510-49b9836ed3ff // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// I've got a small patch that forces the dispatching of events to be synchronous, instead
+// of asynchronous. The main issue I was running into was that events would arrive out
+// of order - I'd get permission requests before the tool event, or I'd get chat chunks
+// out of order, etc...
+//
+// Looking at the other libraries, they appear to only dispatch a single message at a time.
+//
+// https://github.com/richardpark-msft/acp-go-sdk/tree/rp_disable_async_dispatch
+replace github.com/coder/acp-go-sdk v0.6.3 => ../../../acp-go-sdk

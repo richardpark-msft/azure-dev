@@ -95,7 +95,8 @@ func (i *Input) ReadInput(ctx context.Context, config *InputConfig, handler KeyP
 			}
 		}
 
-		log.Printf("Keyboard opened successfully after %d tries\n", tries)
+		// Commented out as it was showing up during my debugging runs.
+		//log.Printf("Keyboard opened successfully after %d tries\n", tries)
 		break
 	}
 

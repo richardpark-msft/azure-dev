@@ -18,11 +18,13 @@ import (
 	"github.com/azure/azure-dev/cli/azd/internal/agent"
 	"github.com/azure/azure-dev/cli/azd/internal/agent/consent"
 	"github.com/azure/azure-dev/cli/azd/internal/agent/feedback"
-	"github.com/azure/azure-dev/cli/azd/internal/agent/tools/common"
+	"github.com/azure/azure-dev/cli/azd/internal/copilot"
+	"github.com/azure/azure-dev/cli/azd/internal/mcp/tools/prompts"
 	"github.com/azure/azure-dev/cli/azd/internal/repository"
 	"github.com/azure/azure-dev/cli/azd/internal/tracing"
 	"github.com/azure/azure-dev/cli/azd/internal/tracing/fields"
 	"github.com/azure/azure-dev/cli/azd/pkg/alpha"
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment/azdcontext"
 	"github.com/azure/azure-dev/cli/azd/pkg/exec"
@@ -37,9 +39,9 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/tools"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools/git"
 	"github.com/azure/azure-dev/cli/azd/pkg/workflow"
+	"github.com/coder/acp-go-sdk"
 	"github.com/fatih/color"
 	"github.com/joho/godotenv"
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -68,6 +70,7 @@ type initFlags struct {
 	fromCode       bool
 	minimal        bool
 	up             bool
+	useCopilotCLI  bool
 	internal.EnvFlag
 }
 
@@ -121,6 +124,15 @@ func (i *initFlags) Bind(local *pflag.FlagSet, global *internal.GlobalCommandOpt
 		false,
 		"Provision and deploy to Azure after initializing the project from a template.",
 	)
+
+	local.BoolVarP(
+		&i.useCopilotCLI,
+		"use-copilot-cli",
+		"",
+		false,
+		"Use the copilot CLI as the agent, instead of the azd's agent",
+	)
+
 	local.StringVarP(&i.location, "location", "l", "", "Azure location for the new environment")
 	i.EnvFlag.Bind(local, global)
 
@@ -141,6 +153,7 @@ type initAction struct {
 	azd               workflow.AzdCommandRunner
 	agentFactory      *agent.AgentFactory
 	consentManager    consent.ConsentManager
+	userConfigManager config.UserConfigManager
 }
 
 func newInitAction(
@@ -157,6 +170,7 @@ func newInitAction(
 	azd workflow.AzdCommandRunner,
 	agentFactory *agent.AgentFactory,
 	consentManager consent.ConsentManager,
+	userConfigManager config.UserConfigManager,
 ) actions.Action {
 	return &initAction{
 		lazyAzdCtx:        lazyAzdCtx,
@@ -172,6 +186,7 @@ func newInitAction(
 		azd:               azd,
 		agentFactory:      agentFactory,
 		consentManager:    consentManager,
+		userConfigManager: userConfigManager,
 	}
 }
 
@@ -394,34 +409,36 @@ func (i *initAction) initAppWithAgent(ctx context.Context) error {
 		TitleNote: "CTRL C to cancel interaction \n? to pull up help text",
 	})
 
-	// Check read only tool consent
-	readOnlyRule, err := i.consentManager.CheckConsent(ctx,
-		consent.ConsentRequest{
-			ToolID:     "*/*",
-			ServerName: "*",
-			Operation:  consent.OperationTypeTool,
-			Annotations: mcp.ToolAnnotation{
-				ReadOnlyHint: common.ToPtr(true),
-			},
-		},
-	)
-	if err != nil {
-		return err
-	}
+	var azdAgent agent.Agent
+	var err error
 
-	if !readOnlyRule.Allowed {
-		consentChecker := consent.NewConsentChecker(i.consentManager, "")
-		err = consentChecker.PromptAndGrantReadOnlyToolConsent(ctx)
+	if i.flags.useCopilotCLI {
+		// this branch is the "ignore all previous agent code" and uses copilot with --acp
+		nano := time.Now().UnixNano()
+
+		acpClient, err := copilot.NewACPClient(ctx, &copilot.ACPClientOptions{
+			// TODO: make...less hardcoded. :)
+			LogPath: fmt.Sprintf("/home/ripark/src/_projects/azd-copilot/azd-copilot-integration/cli/azd/internal/copilot/main/clilogs/%d_azdcli.jsonl", nano),
+		})
+
 		if err != nil {
-			return err
+		  return err
 		}
-		i.console.Message(ctx, "")
-	}
 
-	azdAgent, err := i.agentFactory.Create(
-		ctx,
-		agent.WithDebug(i.flags.global.EnableDebugLogging),
-	)
+		azdAgent, err = acpClient.NewSession(ctx, copilot.StartSessionRequest{
+				NewSessionRequest: acp.NewSessionRequest{
+					// TODO: this Cwd should constrain where operations can write/read from, as documented
+					// with the protocol. (I'm unsure if 'blank' is the same as passing current folder)
+					Cwd: "",
+					McpServers: []acp.McpServer{},
+				},
+			})
+	} else {
+		azdAgent, err = i.agentFactory.Create(
+			ctx,
+			agent.WithDebug(i.flags.global.EnableDebugLogging),
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -432,6 +449,10 @@ func (i *initAction) initAppWithAgent(ctx context.Context) error {
 		Name         string
 		Description  string
 		SummaryTitle string
+		// RP: Need to narrow this down - it looks like our MCP server isn't being loaded, even when I specify
+		// it via the configuration when creating a session. Our MCP tools were really just pointers to prompt
+		// files so I just included them as part of the initial prompt instead.
+		PromptFile string
 	}
 
 	taskInput := `Your task: %s
@@ -446,31 +467,37 @@ Do not stop until all tasks are complete and fully resolved.
 			Name:         "Step 1: Running Discovery & Analysis",
 			Description:  "Run a deep discovery and analysis on the current working directory.",
 			SummaryTitle: "Step 1 (discovery & analysis)",
+			PromptFile: prompts.AzdDiscoveryAnalysisPrompt,
 		},
 		{
 			Name:         "Step 2: Generating Architecture Plan",
 			Description:  "Create a high-level architecture plan for the application.",
 			SummaryTitle: "Step 2 (architecture plan)",
+			PromptFile: prompts.AzdArchitecturePlanningPrompt,
 		},
 		{
 			Name:         "Step 3: Generating Dockerfile(s)",
 			Description:  "Generate a Dockerfile for the application components as needed.",
 			SummaryTitle: "Step 3 (dockerfile generation)",
+			PromptFile: prompts.AzdDockerGenerationPrompt,
 		},
 		{
 			Name:         "Step 4: Generating infrastructure",
 			Description:  "Generate infrastructure as code (IaC) for the application.",
 			SummaryTitle: "Step 4 (infrastructure generation)",
+			PromptFile: prompts.AzdInfrastructureGenerationPrompt,
 		},
 		{
 			Name:         "Step 5: Generating azure.yaml file",
 			Description:  "Generate an azure.yaml file for the application.",
 			SummaryTitle: "Step 5 (azure.yaml generation)",
+			PromptFile: prompts.AzdAzureYamlGenerationPrompt,
 		},
 		{
 			Name:         "Step 6: Validating project",
 			Description:  "Validate the project structure and configuration.",
 			SummaryTitle: "Step 6 (project validation)",
+			PromptFile: prompts.AzdProjectValidationPrompt,
 		},
 	}
 
@@ -505,7 +532,7 @@ Do not stop until all tasks are complete and fully resolved.
 				"Keep it concise and focus on high-level accomplishments, not implementation details.",
 		}, "\n"))
 
-		agentOutput, err := azdAgent.SendMessageWithRetry(ctx, fullTaskInput)
+		agentOutput, err := azdAgent.SendMessageWithRetry(ctx, fullTaskInput, step.PromptFile)
 		if err != nil {
 			if agentOutput != "" {
 				i.console.Message(ctx, output.WithMarkdown(agentOutput))
@@ -514,12 +541,12 @@ Do not stop until all tasks are complete and fully resolved.
 			return err
 		}
 
-		stepSummaries = append(stepSummaries, agentOutput)
-
-		i.console.Message(ctx, "")
-		i.console.Message(ctx, color.HiMagentaString(fmt.Sprintf("◆ %s Summary:", step.SummaryTitle)))
-		i.console.Message(ctx, output.WithMarkdown(agentOutput))
-		i.console.Message(ctx, "")
+		// copilot is printing out the summary in it's output, so we don't need to do this.
+		// stepSummaries = append(stepSummaries, agentOutput)
+		// i.console.Message(ctx, "")
+		// i.console.Message(ctx, color.HiMagentaString(fmt.Sprintf("◆ %s Summary:", step.SummaryTitle)))
+		// i.console.Message(ctx, output.WithMarkdown(agentOutput))
+		// i.console.Message(ctx, "")
 	}
 
 	// Post-completion summary
@@ -536,6 +563,7 @@ func (i *initAction) collectAndApplyFeedback(
 	azdAgent agent.Agent,
 	promptMessage string,
 ) error {
+	output.WithGrayFormat("")
 	AIDisclaimer := output.WithGrayFormat("The following content is AI-generated. AI responses may be incorrect.")
 	collector := feedback.NewFeedbackCollector(i.console, feedback.FeedbackCollectorOptions{
 		EnableLoop:      true,
@@ -601,28 +629,29 @@ func promptInitType(console input.Console, ctx context.Context, featuresManager 
 		options = append(options, fmt.Sprintf("Use agent mode %s", color.YellowString("(Alpha)")))
 	}
 
-	selection, err := console.Select(ctx, input.ConsoleOptions{
-		Message: "How do you want to initialize your app?",
-		Options: options,
-	})
-	if err != nil {
-		return initUnknown, err
-	}
+	// selection, err := console.Select(ctx, input.ConsoleOptions{
+	// 	Message:      "How do you want to initialize your app?",
+	// 	Options:      options,
+	// 	DefaultValue: fmt.Sprintf("Use agent mode %s", color.YellowString("(Alpha)")),
+	// })
+	// if err != nil {
+	// 	return initUnknown, err
+	// }
 
-	switch selection {
-	case 0:
-		return initFromApp, nil
-	case 1:
-		return initAppTemplate, nil
-	case 2:
-		// Only return initWithCopilot if the LLM feature is enabled and we have 3 options
-		if featuresManager.IsEnabled(llm.FeatureLlm) {
-			return initWithAgent, nil
-		}
-		fallthrough
-	default:
-		panic("unhandled selection")
-	}
+	// switch selection {
+	// case 0:
+	// 	return initFromApp, nil
+	// case 1:
+	// 	return initAppTemplate, nil
+	// case 2:
+	// Only return initWithCopilot if the LLM feature is enabled and we have 3 options
+	// if featuresManager.IsEnabled(llm.FeatureLlm) {
+	return initWithAgent, nil
+	// }
+	// fallthrough
+	// default:
+	// 	panic("unhandled selection")
+	// }
 }
 
 func (i *initAction) initializeTemplate(
