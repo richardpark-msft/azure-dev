@@ -2,6 +2,7 @@ package copilot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -354,4 +355,70 @@ func (a *ACPConnection) KillTerminalCommand(ctx context.Context, params acp.Kill
 	return acp.KillTerminalCommandResponse{}, nil
 }
 
+type MCP struct {
+	Name    string   `json:"-"`
+	Type    string   `json:"type"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Tools   []string `json:"tools"`
+}
 
+func getMCPConfigForSelf() (MCP, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return MCP{}, fmt.Errorf("failed to determine currently executing azd path: %w", err)
+	}
+
+	// os.Executable comes with a bunch of caveats, including not being able to properly resolve symlinks...
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		resolved = exe
+	}
+
+	azdAbsPath, err := filepath.Abs(resolved)
+	if err != nil {
+		return MCP{}, fmt.Errorf("failed to get absolute path for azd '%s': %w", resolved, err)
+	}
+
+	return MCP{
+		Name:    "azd",
+		Type:    "local",
+		Command: azdAbsPath,
+		Args:    []string{"mcp", "start"},
+		Tools:   []string{"*"},
+	}, nil
+}
+
+type mcpEnvelope struct {
+	MCPServers map[string]MCP `json:"mcpServers"`
+}
+
+func getMCPJson(includeSelf bool, mcps []MCP) (string, error) {
+	if includeSelf {
+		me, err := getMCPConfigForSelf()
+
+		if err != nil {
+			return "", err
+		}
+
+		mcps = append(mcps, me)
+	}
+
+	mcpMap := map[string]MCP{}
+
+	for _, mcp := range mcps {
+		mcpMap[mcp.Name] = mcp
+	}
+
+	envelope := mcpEnvelope{
+		MCPServers: mcpMap,
+	}
+
+	mcpJSONBytes, err := json.Marshal(envelope)
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(mcpJSONBytes), nil
+}
