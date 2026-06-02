@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/refs/heads/main/cli/azd/extensions/extension.schema.json
+capabilities:
+    - custom-commands
+    - metadata
+description: Save, load, and interpret dream journal entries with Azure Storage and Azure AI. (Preview)
+displayName: Dream Journal (Preview)
+id: azure.ai.dreams
+language: go
+namespace: ai.dream
+usage: azd ai dream <command> [options]
+version: 0.0.1
+examples:
+    - name: save
+      description: Save a dream from inline text.
+      usage: azd ai dream save --title "Moonlight" --text "I walked through a silver forest."
+    - name: list
+      description: List saved dream entries.
+      usage: azd ai dream list
+    - name: load
+      description: Load a saved dream by ID.
+      usage: azd ai dream load --id <dream-id>
+    - name: interpret
+      description: Interpret a saved dream with Azure AI and store the interpretation.
+      usage: azd ai dream interpret --id <dream-id>
