@@ -105,8 +105,8 @@ func configFromValues(azdValues map[string]string, osValues map[string]string) (
 
 	if cfg.storageConnectionString == "" {
 		return nil, &azdext.LocalError{
-			Message: "missing Azure Storage connection string",
-			Code:    "missing_storage_connection_string",
+			Message:  "missing Azure Storage connection string",
+			Code:     "missing_storage_connection_string",
 			Category: azdext.LocalErrorCategoryDependency,
 			Suggestion: "Set DREAM_STORAGE_CONNECTION_STRING (or AZURE_STORAGE_CONNECTION_STRING) " +
 				"in the active azd environment or shell.",

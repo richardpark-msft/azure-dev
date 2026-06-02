@@ -34,7 +34,7 @@ type dreamInterpretation struct {
 }
 
 type interpretResult struct {
-	DreamID         string              `json:"dreamId,omitempty"`
-	Interpretation  dreamInterpretation `json:"interpretation"`
-	InterpretationAt time.Time          `json:"interpretationAt"`
+	DreamID          string              `json:"dreamId,omitempty"`
+	Interpretation   dreamInterpretation `json:"interpretation"`
+	InterpretationAt time.Time           `json:"interpretationAt"`
 }

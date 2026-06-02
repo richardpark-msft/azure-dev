@@ -21,11 +21,11 @@ type dreamInterpreter interface {
 }
 
 type azureOpenAIInterpreter struct {
-	httpClient  *http.Client
-	endpoint    string
-	apiKey      string
-	deployment  string
-	apiVersion  string
+	httpClient *http.Client
+	endpoint   string
+	apiKey     string
+	deployment string
+	apiVersion string
 }
 
 func newAzureOpenAIInterpreter(cfg *extensionConfig) (*azureOpenAIInterpreter, error) {

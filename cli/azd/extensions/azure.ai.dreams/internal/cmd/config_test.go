@@ -22,7 +22,7 @@ func TestConfigFromValuesUsesAzdEnvironmentSettings(t *testing.T) {
 			"DREAM_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
 			"DREAM_STORAGE_CONTAINER":         "night-notes",
 			"DREAM_AI_ENDPOINT":               "https://example.openai.azure.com",
-			"DREAM_AI_KEY":                    "secret",
+			"DREAM_AI_KEY":                    "example-key",
 			"DREAM_AI_DEPLOYMENT":             "gpt",
 		},
 		map[string]string{},
