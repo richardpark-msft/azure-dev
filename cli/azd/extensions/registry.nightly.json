@@ -5,6 +5,9 @@
       "versions": [
         {
           "version": "0.1.0-nightly.20260619.1001"
+        },
+        {
+          "version": "0.1.0-nightly.20260619.1002"
         }
       ]
     }
