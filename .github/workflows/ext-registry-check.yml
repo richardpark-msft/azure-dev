@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - "cli/azd/extensions/registry.json"
-    branches: [main]
+    branches: [main, azd-auto-approve-simple-updates]
     types: [opened, edited, synchronize, labeled, unlabeled, reopened, ready_for_review]
 
 # If two events are triggered within a short time in the same PR, cancel the run of the oldest event
@@ -30,6 +30,6 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const script = require('./.github/scripts/pr-extensions-registry-update.js');
+            const script = require('./.github/scripts/ext-registry-check.js');
             await script({ github, context, core });
   
