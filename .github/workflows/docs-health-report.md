@@ -104,7 +104,7 @@ cannot be justified with repository evidence.
 
 If you find no actionable drift, do **not** create an issue.
 
-Otherwise, create **one** GitHub issue with a concise, scannable report.
+Otherwise, create **at most one** GitHub issue with a concise, scannable report.
 
 Use this structure:
 
