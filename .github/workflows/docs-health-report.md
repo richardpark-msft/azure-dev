@@ -2,6 +2,8 @@
 name: Docs Health Report
 on:
   schedule:
+    # NOTE: Using the fuzzy form for scheduling lets gh-aw jitter the exact minute
+    # across repos so scheduled runs do not all spike at the same time.
     - cron: "weekly on monday"
   workflow_dispatch:
     inputs:
