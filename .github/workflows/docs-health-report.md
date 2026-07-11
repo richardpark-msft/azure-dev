@@ -13,7 +13,7 @@ on:
         type: string
       max_findings:
         description: >-
-          Maximum number of findings to report. Default: 10.
+          Maximum number of findings to report. String input; default: 10.
         required: false
         default: "10"
         type: string
@@ -97,8 +97,8 @@ cannot be justified with repository evidence.
    user is stale, include it even if no Markdown file is involved.
 5. Keep findings deduplicated. Prefer one finding per underlying drift theme,
    with the strongest supporting examples.
-6. Cap the final report at **max_findings** findings, defaulting to 10 when the
-   input is empty or invalid.
+6. Cap the final report at the numeric value of **max_findings**, defaulting to
+   10 when the string input is empty or invalid.
 
 ## Output
 
@@ -108,7 +108,7 @@ Otherwise, create **one** GitHub issue with a concise, scannable report.
 
 Use this structure:
 
-- Title: `Docs health report: stale docs and user-facing strings`
+- Title: `Docs Health Report: stale docs and user-facing strings`
 - Opening sentence that links the report to this workflow and explains the scope
 - **Settings**
   - Scope used
