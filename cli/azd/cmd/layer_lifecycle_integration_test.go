@@ -641,6 +641,16 @@ func TestLayerLifecycle_Deploy(t *testing.T) {
 	runLayerLifecycleTests(t, tests)
 }
 
+// TestLayerLifecycle_DeployFiltersBeforeInitialization describes the service-selection boundary
+// required by deploy: unrelated layers must not initialize service targets or require their tools.
+func TestLayerLifecycle_DeployFiltersBeforeInitialization(t *testing.T) {
+	scenario := newLayerLifecycleScenario(t, layerLifecycleProjectYAML)
+
+	require.NoError(t, scenario.run("deploy", "--layer", "app", "--no-prompt"))
+	require.ElementsMatch(t, []string{"api", "worker"}, scenario.services.initializedServices())
+	require.ElementsMatch(t, []string{"api", "worker"}, scenario.services.toolCheckedServices())
+}
+
 func TestLayerLifecycle_Down(t *testing.T) {
 	tests := []layerLifecycleTestCase{
 		{
@@ -806,6 +816,7 @@ func runLayerLifecycleTests(t *testing.T, tests []layerLifecycleTestCase) {
 			require.Equal(t, test.expectedDestroyed, scenario.deployments.destroyedLayers())
 
 			deployed := scenario.services.deployedServices()
+			require.ElementsMatch(t, test.expectedServices, deployed)
 			checkSequencing(t, deployed, test.serviceOrder)
 		})
 	}
@@ -835,18 +846,26 @@ func (lifecycleEnvironmentDetails) GetLocation(
 type recordingServiceTarget struct {
 	project.ServiceTarget
 
-	mu       sync.Mutex
-	deployed []string
+	mu          sync.Mutex
+	initialized []string
+	toolChecked []string
+	deployed    []string
 }
 
-func (t *recordingServiceTarget) Initialize(context.Context, *project.ServiceConfig) error {
+func (t *recordingServiceTarget) Initialize(_ context.Context, service *project.ServiceConfig) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.initialized = append(t.initialized, service.Name)
 	return nil
 }
 
 func (t *recordingServiceTarget) RequiredExternalTools(
-	context.Context,
-	*project.ServiceConfig,
+	_ context.Context,
+	service *project.ServiceConfig,
 ) []tools.ExternalTool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.toolChecked = append(t.toolChecked, service.Name)
 	return nil
 }
 
@@ -909,6 +928,18 @@ func (t *recordingServiceTarget) deployedServices() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return slices.Clone(t.deployed)
+}
+
+func (t *recordingServiceTarget) initializedServices() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.initialized)
+}
+
+func (t *recordingServiceTarget) toolCheckedServices() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.toolChecked)
 }
 
 // checkSequencing checks that each predecessor appears before its successors.
