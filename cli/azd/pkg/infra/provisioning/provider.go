@@ -66,6 +66,10 @@ type Options struct {
 	// .parameters.json contents alone. Only valid on layer entries under
 	// the `infra.layers` array.
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	// Inputs maps provider-local input names to shared azd environment keys.
+	Inputs map[string]string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	// Outputs maps provider output names to shared azd environment keys.
+	Outputs map[string]string `yaml:"outputs,omitempty" json:"outputs,omitempty"`
 	// Provisioning options for each individually defined layer.
 	Layers []Options `yaml:"layers,omitempty"`
 
@@ -215,10 +219,6 @@ func (o *Options) validateLayers() error {
 		}
 
 		seenLayers[layer.Name] = struct{}{}
-
-		if layer.Path == "" {
-			return fmt.Errorf("%s: path must be specified", layer.Name)
-		}
 
 		if err := validateHooks(layer.Name, layer.Hooks); err != nil {
 			return err

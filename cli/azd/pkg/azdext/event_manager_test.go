@@ -446,6 +446,36 @@ func TestEventManager_onInvokeServiceHandler_NoHandler(t *testing.T) {
 	assert.Nil(t, resp.MessageType) // But the MessageType is nil (empty message)
 }
 
+func TestEventManager_onInvokeLayerHandler_Success(t *testing.T) {
+	eventManager := NewEventManager("microsoft.azd.demo", &AzdClient{}, nil)
+	var received *LayerEventArgs
+	eventManager.layerEvents["predeploy"] = func(_ context.Context, args *LayerEventArgs) error {
+		received = args
+		return nil
+	}
+
+	response, err := eventManager.onInvokeLayerHandler(t.Context(), &InvokeLayerHandler{
+		EventName: "predeploy",
+		Project:   createTestProjectConfigForEvents(),
+		Layer:     &Layer{Name: "writer-agent"},
+		Scope: &ExecutionScope{
+			TargetLayers:        []string{"writer-agent"},
+			IncludedLayers:      []string{"foundry", "writer-agent"},
+			ServiceNames:        []string{"ai-project", "writer-agent"},
+			IncludeDependencies: true,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, received)
+	assert.Equal(t, "writer-agent", received.Layer.Name)
+	assert.True(t, received.Scope.IncludeDependencies)
+	statusMessage, ok := response.MessageType.(*EventMessage_LayerHandlerStatus)
+	require.True(t, ok)
+	assert.Equal(t, "completed", statusMessage.LayerHandlerStatus.Status)
+	assert.Equal(t, "writer-agent", statusMessage.LayerHandlerStatus.LayerName)
+}
+
 // Test RemoveProjectEventHandler
 func TestEventManager_RemoveProjectEventHandler(t *testing.T) {
 	client := &AzdClient{}

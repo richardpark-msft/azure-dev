@@ -59,6 +59,7 @@ func Parse(ctx context.Context, yamlContent string) (*ProjectConfig, error) {
 	}
 
 	projectConfig.EventDispatcher = ext.NewEventDispatcher[ProjectLifecycleEventArgs]()
+	projectConfig.LayerEventDispatcher = ext.NewEventDispatcher[LayerLifecycleEventArgs]()
 
 	if projectConfig.RequiredVersions != nil && projectConfig.RequiredVersions.Azd != nil {
 		supportedRange, err := semver.ParseRange(*projectConfig.RequiredVersions.Azd)
@@ -322,7 +323,7 @@ func Save(ctx context.Context, projectConfig *ProjectConfig, projectFilePath str
 		return fmt.Errorf("preparing new project file contents: %w", err)
 	}
 
-	err = os.WriteFile(projectFilePath, projectFileContents.Bytes(), osutil.PermissionFile)
+	err = writeProjectFile(projectFilePath, projectFileContents.Bytes(), osutil.PermissionFile)
 	if err != nil {
 		return fmt.Errorf("saving project file: %w", err)
 	}

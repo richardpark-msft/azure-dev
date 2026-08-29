@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/azure/azure-dev/cli/azd/internal/mapper"
 	"github.com/azure/azure-dev/cli/azd/pkg/azdext"
@@ -90,6 +91,10 @@ func (s *eventService) EventStream(stream grpc.BidiStreamingServer[azdext.EventM
 		return nil, s.onSubscribeServiceEvent(ctx, extension, msg, broker)
 	})
 
+	broker.On(func(ctx context.Context, msg *azdext.SubscribeLayerEvent) (*azdext.EventMessage, error) {
+		return nil, s.onSubscribeLayerEvent(ctx, extension, msg, broker)
+	})
+
 	// Run the broker's dispatcher (blocking)
 	if err := broker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("broker error: %w", err)
@@ -161,6 +166,7 @@ func (s *eventService) createProjectEventHandler(
 				InvokeProjectHandler: &azdext.InvokeProjectHandler{
 					EventName: eventName,
 					Project:   protoProjectConfig,
+					Scope:     executionScopeFromArgs(args.Args),
 				},
 			},
 		}
@@ -198,6 +204,98 @@ func (s *eventService) createProjectEventHandler(
 
 			return nil
 		})
+	}
+}
+
+func (s *eventService) onSubscribeLayerEvent(
+	ctx context.Context,
+	extension *extensions.Extension,
+	subscribeMsg *azdext.SubscribeLayerEvent,
+	broker *grpcbroker.MessageBroker[azdext.EventMessage],
+) error {
+	if subscribeMsg == nil || len(subscribeMsg.EventNames) == 0 {
+		return status.Error(codes.InvalidArgument, "event names are required")
+	}
+	projectConfig, err := s.lazyProject.GetValue()
+	if err != nil {
+		return err
+	}
+	if projectConfig.LayerEventDispatcher == nil {
+		projectConfig.LayerEventDispatcher = ext.NewEventDispatcher[project.LayerLifecycleEventArgs]()
+	}
+	for _, eventName := range subscribeMsg.EventNames {
+		if eventName == "" {
+			return status.Error(codes.InvalidArgument, "event name cannot be empty")
+		}
+		handler := s.createLayerEventHandler(ctx, extension, eventName, broker)
+		if err := projectConfig.LayerEventDispatcher.AddHandler(ctx, ext.Event(eventName), handler); err != nil {
+			return fmt.Errorf("failed to add layer handler for event %s: %w", eventName, err)
+		}
+	}
+	return nil
+}
+
+func (s *eventService) createLayerEventHandler(
+	streamCtx context.Context,
+	extension *extensions.Extension,
+	eventName string,
+	broker *grpcbroker.MessageBroker[azdext.EventMessage],
+) ext.EventHandlerFn[project.LayerLifecycleEventArgs] {
+	return func(ctx context.Context, args project.LayerLifecycleEventArgs) error {
+		resolver := noEnvResolver
+		if env, err := s.lazyEnv.GetValue(); err == nil && env != nil {
+			resolver = env.Getenv
+		}
+		objectMapper := mapper.WithResolver(resolver)
+		var protoProject *azdext.ProjectConfig
+		if err := objectMapper.Convert(args.Project, &protoProject); err != nil {
+			return err
+		}
+		var protoLayer *azdext.Layer
+		if err := objectMapper.Convert(args.Layer, &protoLayer); err != nil {
+			return err
+		}
+		invokeMsg := &azdext.EventMessage{
+			MessageType: &azdext.EventMessage_InvokeLayerHandler{
+				InvokeLayerHandler: &azdext.InvokeLayerHandler{
+					EventName: eventName,
+					Project:   protoProject,
+					Layer:     protoLayer,
+					Scope:     executionScopeToProto(args.Scope),
+				},
+			},
+		}
+		response, err := broker.SendAndWait(streamCtx, invokeMsg)
+		if err != nil {
+			return fmt.Errorf("failed to send invoke message for layer event %s: %w", eventName, err)
+		}
+		statusMsg, ok := response.MessageType.(*azdext.EventMessage_LayerHandlerStatus)
+		if !ok {
+			return fmt.Errorf("unexpected response type for layer event %s", eventName)
+		}
+		if statusMsg.LayerHandlerStatus.Status == "failed" {
+			if extErr := azdext.UnwrapError(statusMsg.LayerHandlerStatus.Error); extErr != nil {
+				return extErr
+			}
+			return fmt.Errorf("extension %s layer hook %s failed: %s", extension.Id, eventName, statusMsg.LayerHandlerStatus.Message)
+		}
+		return nil
+	}
+}
+
+func executionScopeFromArgs(args map[string]any) *azdext.ExecutionScope {
+	if scope, ok := args["executionScope"].(project.ExecutionScope); ok {
+		return executionScopeToProto(scope)
+	}
+	return nil
+}
+
+func executionScopeToProto(scope project.ExecutionScope) *azdext.ExecutionScope {
+	return &azdext.ExecutionScope{
+		TargetLayers:        slices.Clone(scope.TargetLayers),
+		IncludedLayers:      slices.Clone(scope.IncludedLayers),
+		ServiceNames:        slices.Clone(scope.ServiceNames),
+		IncludeDependencies: scope.IncludeDependencies,
 	}
 }
 

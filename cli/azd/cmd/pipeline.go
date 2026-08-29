@@ -31,6 +31,18 @@ type pipelineConfigFlags struct {
 	internal.EnvFlag
 }
 
+// pipelineConfigManager is the subset of [*pipeline.PipelineManager] used by
+// pipelineConfigAction. It exists as a narrow interface to support test stubs.
+type pipelineConfigManager interface {
+	CiProviderName() string
+	SetParameters(parameters []provisioning.Parameter)
+	Configure(
+		ctx context.Context,
+		projectName string,
+		infra *project.Infra,
+	) (*pipeline.PipelineConfigResult, error)
+}
+
 func (pc *pipelineConfigFlags) Bind(local *pflag.FlagSet, global *internal.GlobalCommandOptions) {
 	local.StringVar(
 		&pc.PipelineServicePrincipalId,
@@ -127,7 +139,7 @@ func newPipelineConfigCmd() *cobra.Command {
 type pipelineConfigAction struct {
 	flags               *pipelineConfigFlags
 	alphaFeatureManager *alpha.FeatureManager
-	manager             *pipeline.PipelineManager
+	manager             pipelineConfigManager
 	provisioningManager *provisioning.Manager
 	env                 *environment.Environment
 	console             input.Console
@@ -142,7 +154,7 @@ func newPipelineConfigAction(
 	flags *pipelineConfigFlags,
 	alphaFeatureManager *alpha.FeatureManager,
 	prompters prompt.Prompter,
-	manager *pipeline.PipelineManager,
+	manager pipelineConfigManager,
 	provisioningManager *provisioning.Manager,
 	importManager *project.ImportManager,
 	projectConfig *project.ProjectConfig,
@@ -243,9 +255,13 @@ func (p *pipelineConfigAction) Run(ctx context.Context) (*actions.ActionResult, 
 
 			// Save current outputs
 			for _, output := range outputs {
+				environmentKey := output.Name
+				if mapped, has := layer.Outputs[output.Name]; has {
+					environmentKey = mapped
+				}
 				// Use a sentinel value that records the source layer and output name so
 				// downstream virtual env substitutions remain traceable during planning.
-				virtualEnv[output.Name] = fmt.Sprintf("%s--%s", layer.Name, output.Name)
+				virtualEnv[environmentKey] = fmt.Sprintf("%s--%s", layer.Name, output.Name)
 			}
 		}
 	}

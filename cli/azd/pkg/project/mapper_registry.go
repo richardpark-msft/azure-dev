@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/azure/azure-dev/cli/azd/internal/mapper"
 	"github.com/azure/azure-dev/cli/azd/pkg/azdext"
@@ -155,6 +157,8 @@ func registerProjectMappings() {
 
 		return &azdext.ServiceConfig{
 			Name:                 src.Name,
+			Layer:                src.Layer,
+			DependsOn:            slices.Clone(src.DependsOn),
 			ResourceGroupName:    resourceGroupName,
 			ResourceName:         resourceName,
 			ApiVersion:           src.ApiVersion,
@@ -373,6 +377,8 @@ func registerProjectMappings() {
 
 		result := &ServiceConfig{
 			Name:              src.Name,
+			Layer:             src.Layer,
+			DependsOn:         slices.Clone(src.DependsOn),
 			ResourceGroupName: osutil.NewExpandableString(src.ResourceGroupName),
 			ResourceName:      osutil.NewExpandableString(src.ResourceName),
 			ApiVersion:        src.ApiVersion,
@@ -418,6 +424,68 @@ func registerProjectMappings() {
 			}
 		}
 
+		return result, nil
+	})
+
+	mapper.MustRegister(func(ctx context.Context, src provisioning.Options) (*azdext.InfraOptions, error) {
+		var protoConfig *structpb.Struct
+		if src.Config != nil {
+			var err error
+			protoConfig, err = structpb.NewStruct(src.Config)
+			if err != nil {
+				return nil, fmt.Errorf("converting infrastructure config to structpb: %w", err)
+			}
+		}
+
+		return &azdext.InfraOptions{
+			Provider: string(src.Provider),
+			Path:     src.Path,
+			Module:   src.Module,
+			Config:   protoConfig,
+		}, nil
+	})
+
+	mapper.MustRegister(func(ctx context.Context, src *azdext.InfraOptions) (provisioning.Options, error) {
+		if src == nil {
+			return provisioning.Options{}, nil
+		}
+
+		result := provisioning.Options{
+			Provider: provisioning.ProviderKind(src.Provider),
+			Path:     src.Path,
+			Module:   src.Module,
+		}
+		if src.Config != nil {
+			result.Config = src.Config.AsMap()
+		}
+		return result, nil
+	})
+
+	mapper.MustRegister(func(ctx context.Context, src *Layer) (*azdext.Layer, error) {
+		if src == nil {
+			return nil, nil
+		}
+		resolver := mapper.GetResolver(ctx)
+		result := &azdext.Layer{
+			Name:      src.Name,
+			Services:  make(map[string]*azdext.ServiceConfig, len(src.Services)),
+			DependsOn: slices.Clone(src.DependsOn),
+			Inputs:    maps.Clone(src.Inputs),
+			Outputs:   maps.Clone(src.Outputs),
+			Implicit:  src.Implicit,
+		}
+		if src.Infra != nil {
+			if err := mapper.Convert(*src.Infra, &result.Infra); err != nil {
+				return nil, err
+			}
+		}
+		for _, service := range src.Services {
+			var mapped *azdext.ServiceConfig
+			if err := mapper.WithResolver(resolver).Convert(service, &mapped); err != nil {
+				return nil, err
+			}
+			result.Services[service.Name] = mapped
+		}
 		return result, nil
 	})
 
@@ -729,6 +797,11 @@ func registerProjectMappings() {
 			services[i] = serviceConfig
 		}
 
+		var infra *azdext.InfraOptions
+		if err := mapper.Convert(src.Infra, &infra); err != nil {
+			return nil, fmt.Errorf("converting infrastructure options: %w", err)
+		}
+
 		// Convert additional properties if present
 		var protoAdditionalProperties *structpb.Struct
 		if src.AdditionalProperties != nil {
@@ -749,11 +822,7 @@ func registerProjectMappings() {
 				}
 				return nil
 			}(),
-			Infra: &azdext.InfraOptions{
-				Provider: string(src.Infra.Provider),
-				Path:     src.Infra.Path,
-				Module:   src.Infra.Module,
-			},
+			Infra:                infra,
 			Services:             services,
 			AdditionalProperties: protoAdditionalProperties,
 		}
@@ -792,10 +861,8 @@ func registerProjectMappings() {
 
 		// Convert infra options if present
 		if src.Infra != nil {
-			result.Infra = provisioning.Options{
-				Provider: provisioning.ProviderKind(src.Infra.Provider),
-				Path:     src.Infra.Path,
-				Module:   src.Infra.Module,
+			if err := mapper.Convert(src.Infra, &result.Infra); err != nil {
+				return nil, fmt.Errorf("converting infrastructure options: %w", err)
 			}
 		}
 

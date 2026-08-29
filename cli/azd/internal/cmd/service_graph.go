@@ -149,6 +149,12 @@ type serviceGraphOptions struct {
 	// current call sites leave this empty.
 	deployExtraDeps []string
 
+	// deployServiceDeps returns additional service names whose deploy steps
+	// must complete before the supplied service deploys. `azd up` uses this
+	// to translate logical layer dependencies into concrete graph edges.
+	// Stand-alone deploy leaves it nil.
+	deployServiceDeps func(svc *project.ServiceConfig) []string
+
 	// state is the shared mutable store for per-service ServiceContexts
 	// (produced by package, consumed by publish/deploy) and
 	// ServiceDeployResults (produced by deploy, consumed by the caller
@@ -340,6 +346,14 @@ func addServiceStepsToGraph(g *exegraph.Graph, opts serviceGraphOptions) (*servi
 	if !hasExplicitOrdering && opts.buildGateKey != nil {
 		for _, svc := range opts.services {
 			if opts.buildGateKey(svc) != "" {
+				hasExplicitOrdering = true
+				break
+			}
+		}
+	}
+	if !hasExplicitOrdering && opts.deployServiceDeps != nil {
+		for _, svc := range opts.services {
+			if len(opts.deployServiceDeps(svc)) > 0 {
 				hasExplicitOrdering = true
 				break
 			}
@@ -541,6 +555,20 @@ func addServiceStepsToGraph(g *exegraph.Graph, opts serviceGraphOptions) (*servi
 			depStep := "deploy-" + dep
 			if !slices.Contains(deployDeps, depStep) {
 				deployDeps = append(deployDeps, depStep)
+			}
+		}
+		if opts.deployServiceDeps != nil {
+			for _, dep := range opts.deployServiceDeps(svc) {
+				if dep == svc.Name {
+					continue
+				}
+				if _, ok := serviceNames[dep]; !ok {
+					continue
+				}
+				depStep := "deploy-" + dep
+				if !slices.Contains(deployDeps, depStep) {
+					deployDeps = append(deployDeps, depStep)
+				}
 			}
 		}
 		// Sequential fallback: when no service in this graph declares a

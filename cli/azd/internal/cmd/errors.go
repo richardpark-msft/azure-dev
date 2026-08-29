@@ -33,6 +33,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/extensions"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/pipeline"
+	"github.com/azure/azure-dev/cli/azd/pkg/project"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools/git"
 	"github.com/azure/azure-dev/cli/azd/pkg/update"
@@ -340,6 +341,8 @@ func classifySentinel(err error) string {
 		return "internal.extension_not_found"
 	case errors.Is(err, internal.ErrServiceNotFound):
 		return "internal.service_not_found"
+	case errors.Is(err, project.ErrLayerNotFound):
+		return "internal.layer_not_found"
 	case errors.Is(err, internal.ErrNoExtensionsAvailable):
 		return "internal.no_extensions_available"
 	case errors.Is(err, internal.ErrNoExtensionVersionsAvailable):

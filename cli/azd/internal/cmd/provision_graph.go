@@ -38,6 +38,13 @@ import (
 	"go.uber.org/multierr"
 )
 
+const (
+	ProjectEventKeyPreview        = "preview"        // Value is of type bool.
+	ProjectEventKeyLayer          = "layer"          // Value is of type string.
+	ProjectEventKeyPath           = "path"           // Value is of type string.
+	ProjectEventKeyExecutionScope = "executionScope" // Value is of type [project.ExecutionScope].
+)
+
 // errValidationCanceledByUser is a sentinel returned from [provisionSingleLayer]
 // when the underlying provider reports [provisioning.ProvisionValidationCanceledSkipped].
 // The caller translates it to [internal.ErrAbortedByUser] at the action
@@ -65,6 +72,7 @@ func (p *ProvisionAction) provisionLayersGraph(
 	layers []provisioning.Options,
 	startTime time.Time,
 	previewMode bool,
+	executionScope project.ExecutionScope,
 ) (*actions.ActionResult, error) {
 	// ── no-op: zero layers ───────────────────────────────────────────────
 	// Guards both preview and deploy paths from index-out-of-range panics
@@ -126,6 +134,10 @@ func (p *ProvisionAction) provisionLayersGraph(
 		if err := g.AddStep(&exegraph.Step{
 			Name: provisionLayerStepName(layer),
 			Action: func(ctx context.Context) error {
+				logicalLayer, err := p.importManager.GetLayer(ctx, p.projectConfig, layer.Name)
+				if err != nil {
+					return fmt.Errorf("resolving project layer: %w", err)
+				}
 				if err := p.provisionManager.Initialize(ctx, p.projectConfig.Path, layer); err != nil {
 					return fmt.Errorf("initializing provisioning manager: %w", err)
 				}
@@ -144,19 +156,35 @@ func (p *ProvisionAction) provisionLayersGraph(
 				projectEventArgs := project.ProjectLifecycleEventArgs{
 					Project: p.projectConfig,
 					Args: map[string]any{
-						"preview": false,
-						"layer":   layer.Name,
-						"path":    layerPath,
+						ProjectEventKeyPreview:        false,
+						ProjectEventKeyLayer:          layer.Name,
+						ProjectEventKeyPath:           layerPath,
+						ProjectEventKeyExecutionScope: executionScope,
 					},
+				}
+				layerEventArgs := project.LayerLifecycleEventArgs{
+					Project: p.projectConfig,
+					Layer:   logicalLayer,
+					Scope:   executionScope,
 				}
 
 				var deployResult *provisioning.DeployResult
 				hookErr := p.runLayerProvisionWithHooks(ctx, layer, layerPath, func() error {
-					return p.projectConfig.Invoke(ctx, project.ProjectEventProvision, projectEventArgs, func() error {
+					if err := p.projectConfig.RaiseLayerEvent(
+						ctx, ext.Event("preprovision"), layerEventArgs,
+					); err != nil {
+						return err
+					}
+					if err := p.projectConfig.Invoke(ctx, project.ProjectEventProvision, projectEventArgs, func() error {
 						var innerErr error
 						deployResult, innerErr = p.provisionManager.Deploy(ctx)
 						return innerErr
-					})
+					}); err != nil {
+						return err
+					}
+					return p.projectConfig.RaiseLayerEvent(
+						ctx, ext.Event("postprovision"), layerEventArgs,
+					)
 				})
 				// Raw errors only — the outer graph error path runs every step
 				// failure through wrapProvisionError exactly once, avoiding
@@ -276,7 +304,9 @@ func (p *ProvisionAction) provisionLayersGraph(
 				Name:      stepNames[i],
 				DependsOn: deps,
 				Action: func(ctx context.Context) error {
-					outcome, err := p.provisionSingleLayerWithOutcome(ctx, layer, stepNames[i])
+					outcome, err := p.provisionSingleLayerWithOutcome(
+						ctx, layer, stepNames[i], executionScope,
+					)
 					if err != nil {
 						return err
 					}
@@ -605,6 +635,7 @@ func (p *ProvisionAction) provisionSingleLayerWithOutcome(
 	ctx context.Context,
 	layer provisioning.Options,
 	stepName string,
+	executionScope project.ExecutionScope,
 ) (provisionOutcome, error) {
 	p.ensureGraphShared()
 
@@ -621,6 +652,7 @@ func (p *ProvisionAction) provisionSingleLayerWithOutcome(
 		commandRunner:       p.commandRunner,
 		importManager:       p.importManager,
 		hookMu:              p.graphHookMu,
+		executionScope:      executionScope,
 	}
 
 	result, err := runProvisionSingleLayer(
@@ -797,9 +829,10 @@ type provisionLayerDeps struct {
 	projectPath         string
 	// Hook support: wired so the graph-driven path fires the same lifecycle hooks
 	// as the sequential path (layer hooks + project events + service env updates).
-	projectConfig *project.ProjectConfig
-	commandRunner exec.CommandRunner
-	importManager *project.ImportManager
+	projectConfig  *project.ProjectConfig
+	commandRunner  exec.CommandRunner
+	importManager  *project.ImportManager
+	executionScope project.ExecutionScope
 	// hookMu serializes project event handler execution across concurrent
 	// layers. Handlers like AKS's setK8sContext are not goroutine-safe.
 	hookMu *sync.Mutex
@@ -902,6 +935,10 @@ func runProvisionSingleLayer(
 	if err := mgr.Initialize(ctx, deps.projectPath, layer); err != nil {
 		return nil, fmt.Errorf("initializing layer %s: %w", stepName, err)
 	}
+	logicalLayer, err := deps.importManager.GetLayer(ctx, deps.projectConfig, layer.Name)
+	if err != nil {
+		return nil, fmt.Errorf("resolving project layer %s: %w", stepName, err)
+	}
 
 	// Resolve layer path for hooks (matches sequential runLayerProvisionWithHooks).
 	// Use layer.AbsolutePath so absolute `infra.layers[].path` values are
@@ -934,15 +971,21 @@ func runProvisionSingleLayer(
 	// preview is always false in this code path: the preview flow is
 	// single-layer and goes through provisionPreview() directly. We still
 	// emit the key explicitly so extension handlers that type-assert
-	// args["preview"].(bool) get the expected zero value rather than panic
+	// args[ProjectEventKeyPreview].(bool) get the expected zero value rather than panic
 	// or behave inconsistently across pre/post handlers.
 	projectEventArgs := project.ProjectLifecycleEventArgs{
 		Project: deps.projectConfig,
 		Args: map[string]any{
-			"preview": false,
-			"layer":   layer.Name,
-			"path":    layerPath,
+			ProjectEventKeyPreview:        false,
+			ProjectEventKeyLayer:          layer.Name,
+			ProjectEventKeyPath:           layerPath,
+			ProjectEventKeyExecutionScope: deps.executionScope,
 		},
+	}
+	layerEventArgs := project.LayerLifecycleEventArgs{
+		Project: deps.projectConfig,
+		Layer:   logicalLayer,
+		Scope:   deps.executionScope,
 	}
 	provisionEvent := string(project.ProjectEventProvision)
 	preProvisionEvent := ext.Event("pre" + provisionEvent)
@@ -961,10 +1004,15 @@ func runProvisionSingleLayer(
 		}
 	}
 
-	// ── Step 2: Project pre-provision event ──
+	// ── Step 2: Layer and project pre-provision events ──
 	if err := func() error {
 		deps.hookMu.Lock()
 		defer deps.hookMu.Unlock()
+		if err := deps.projectConfig.RaiseLayerEvent(
+			ctx, preProvisionEvent, layerEventArgs,
+		); err != nil {
+			return err
+		}
 		return deps.projectConfig.RaiseEvent(ctx, preProvisionEvent, projectEventArgs)
 	}(); err != nil {
 		return nil, fmt.Errorf("layer %s pre-provision event: %w", stepName, err)
@@ -1039,11 +1087,16 @@ func runProvisionSingleLayer(
 		}
 	}
 
-	// ── Step 6: Project post-provision event ──
+	// ── Step 6: Project and layer post-provision events ──
 	if err := func() error {
 		deps.hookMu.Lock()
 		defer deps.hookMu.Unlock()
-		return deps.projectConfig.RaiseEvent(ctx, postProvisionEvent, projectEventArgs)
+		if err := deps.projectConfig.RaiseEvent(ctx, postProvisionEvent, projectEventArgs); err != nil {
+			return err
+		}
+		return deps.projectConfig.RaiseLayerEvent(
+			ctx, postProvisionEvent, layerEventArgs,
+		)
 	}(); err != nil {
 		return deployResult, fmt.Errorf("layer %s post-provision event: %w", stepName, err)
 	}

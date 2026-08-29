@@ -18,6 +18,7 @@ type EventManager struct {
 	broker        *grpcbroker.MessageBroker[EventMessage]
 	projectEvents map[string]ProjectEventHandler
 	serviceEvents map[string]ServiceEventHandler
+	layerEvents   map[string]LayerEventHandler
 	eventsMutex   sync.RWMutex // Protects both projectEvents and serviceEvents maps
 	brokerLogger  *log.Logger
 
@@ -27,6 +28,13 @@ type EventManager struct {
 
 type ProjectEventArgs struct {
 	Project *ProjectConfig
+	Scope   *ExecutionScope
+}
+
+type LayerEventArgs struct {
+	Project *ProjectConfig
+	Layer   *Layer
+	Scope   *ExecutionScope
 }
 
 type ServiceEventArgs struct {
@@ -39,12 +47,15 @@ type ProjectEventHandler func(ctx context.Context, args *ProjectEventArgs) error
 
 type ServiceEventHandler func(ctx context.Context, args *ServiceEventArgs) error
 
+type LayerEventHandler func(ctx context.Context, args *LayerEventArgs) error
+
 func NewEventManager(extensionId string, azdClient *AzdClient, brokerLogger *log.Logger) *EventManager {
 	return &EventManager{
 		extensionId:   extensionId,
 		client:        azdClient,
 		projectEvents: make(map[string]ProjectEventHandler),
 		serviceEvents: make(map[string]ServiceEventHandler),
+		layerEvents:   make(map[string]LayerEventHandler),
 		brokerLogger:  brokerLogger,
 	}
 }
@@ -96,6 +107,9 @@ func (em *EventManager) ensureStream(ctx context.Context) error {
 	}
 	if err := em.broker.On(em.onInvokeServiceHandler); err != nil {
 		return fmt.Errorf("failed to register invoke service handler: %w", err)
+	}
+	if err := em.broker.On(em.onInvokeLayerHandler); err != nil {
+		return fmt.Errorf("failed to register invoke layer handler: %w", err)
 	}
 
 	return nil
@@ -195,6 +209,27 @@ func (em *EventManager) AddServiceEventHandler(
 	return nil
 }
 
+func (em *EventManager) AddLayerEventHandler(
+	ctx context.Context,
+	eventName string,
+	handler LayerEventHandler,
+) error {
+	if err := em.ensureStream(ctx); err != nil {
+		return err
+	}
+	if err := em.broker.Send(ctx, &EventMessage{
+		MessageType: &EventMessage_SubscribeLayerEvent{
+			SubscribeLayerEvent: &SubscribeLayerEvent{EventNames: []string{eventName}},
+		},
+	}); err != nil {
+		return err
+	}
+	em.eventsMutex.Lock()
+	defer em.eventsMutex.Unlock()
+	em.layerEvents[eventName] = handler
+	return nil
+}
+
 func (em *EventManager) RemoveProjectEventHandler(eventName string) {
 	em.eventsMutex.Lock()
 	defer em.eventsMutex.Unlock()
@@ -205,6 +240,12 @@ func (em *EventManager) RemoveServiceEventHandler(eventName string) {
 	em.eventsMutex.Lock()
 	defer em.eventsMutex.Unlock()
 	delete(em.serviceEvents, eventName)
+}
+
+func (em *EventManager) RemoveLayerEventHandler(eventName string) {
+	em.eventsMutex.Lock()
+	defer em.eventsMutex.Unlock()
+	delete(em.layerEvents, eventName)
 }
 
 // Handler methods - these are registered with the broker to handle incoming requests
@@ -225,6 +266,7 @@ func (em *EventManager) onInvokeProjectHandler(
 
 	args := &ProjectEventArgs{
 		Project: req.Project,
+		Scope:   req.Scope,
 	}
 
 	handlerStatus := "completed"
@@ -247,6 +289,38 @@ func (em *EventManager) onInvokeProjectHandler(
 				EventName: req.EventName,
 				Status:    handlerStatus,
 				Message:   handlerMessage,
+				Error:     handlerError,
+			},
+		},
+	}, nil
+}
+
+func (em *EventManager) onInvokeLayerHandler(
+	ctx context.Context,
+	req *InvokeLayerHandler,
+) (*EventMessage, error) {
+	em.eventsMutex.RLock()
+	defer em.eventsMutex.RUnlock()
+	handler, exists := em.layerEvents[req.EventName]
+	if !exists {
+		return &EventMessage{}, nil
+	}
+
+	statusValue := "completed"
+	message := ""
+	var handlerError *ExtensionError
+	if err := handler(ctx, &LayerEventArgs{Project: req.Project, Layer: req.Layer, Scope: req.Scope}); err != nil {
+		statusValue = "failed"
+		message = err.Error()
+		handlerError = WrapError(err)
+	}
+	return &EventMessage{
+		MessageType: &EventMessage_LayerHandlerStatus{
+			LayerHandlerStatus: &LayerHandlerStatus{
+				EventName: req.EventName,
+				LayerName: req.Layer.GetName(),
+				Status:    statusValue,
+				Message:   message,
 				Error:     handlerError,
 			},
 		},

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ import (
 
 type DeployFlags struct {
 	ServiceName string
+	Layer       string
 	All         bool
 	Timeout     int
 	fromPackage string
@@ -70,6 +72,7 @@ func (d *DeployFlags) bindCommon(local *pflag.FlagSet, global *internal.GlobalCo
 	d.EnvFlag.Bind(local, global)
 	d.flagSet = local
 
+	local.StringVar(&d.Layer, "layer", "", "Deploys services in the specified layer")
 	local.BoolVar(
 		&d.All,
 		"all",
@@ -125,7 +128,7 @@ func (d *DeployFlags) timeoutChanged() bool {
 
 func NewDeployCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "deploy <service>",
+		Use:   "deploy [<service>]",
 		Short: "Deploy your project code to Azure.",
 	}
 	cmd.Args = cobra.MaximumNArgs(1)
@@ -215,17 +218,24 @@ func (da *DeployAction) Run(ctx context.Context) (*actions.ActionResult, error) 
 		}
 	}
 
-	targetServiceName, err := getTargetServiceName(
-		ctx,
-		da.projectManager,
-		da.importManager,
-		da.projectConfig,
-		string(project.ServiceEventDeploy),
-		targetServiceName,
-		da.flags.All,
-	)
-	if err != nil {
-		return nil, err
+	if da.flags.Layer != "" && da.flags.All {
+		return nil, fmt.Errorf("cannot specify both --layer and --all: %w", internal.ErrInvalidFlagCombination)
+	}
+
+	if da.flags.Layer == "" || targetServiceName != "" {
+		var err error
+		targetServiceName, err = getTargetServiceName(
+			ctx,
+			da.projectManager,
+			da.importManager,
+			da.projectConfig,
+			string(project.ServiceEventDeploy),
+			targetServiceName,
+			da.flags.All,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if da.flags.All && da.flags.fromPackage != "" {
@@ -246,6 +256,31 @@ func (da *DeployAction) Run(ctx context.Context) (*actions.ActionResult, error) 
 		ctx, da.projectConfig, targetServiceName, da.env.Getenv)
 	if err != nil {
 		return nil, err
+	}
+
+	if da.flags.Layer != "" {
+		if _, err := da.importManager.GetLayer(ctx, da.projectConfig, da.flags.Layer); err != nil {
+			return nil, err
+		}
+
+		stableServices = slices.DeleteFunc(stableServices, func(service *project.ServiceConfig) bool {
+			return service.Layer != da.flags.Layer
+		})
+		if targetServiceName != "" && len(stableServices) == 0 {
+			return nil, fmt.Errorf(
+				"service %q does not belong to layer %q: %w",
+				targetServiceName,
+				da.flags.Layer,
+				internal.ErrServiceNotFound,
+			)
+		}
+		if len(stableServices) == 0 {
+			return nil, fmt.Errorf(
+				"layer %q has no enabled services to deploy: %w",
+				da.flags.Layer,
+				internal.ErrServiceNotFound,
+			)
+		}
 	}
 
 	if err := da.projectManager.InitializeServices(ctx, stableServices); err != nil {

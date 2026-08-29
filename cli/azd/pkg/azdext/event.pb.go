@@ -35,6 +35,9 @@ type EventMessage struct {
 	//	*EventMessage_SubscribeServiceEvent
 	//	*EventMessage_InvokeServiceHandler
 	//	*EventMessage_ServiceHandlerStatus
+	//	*EventMessage_SubscribeLayerEvent
+	//	*EventMessage_InvokeLayerHandler
+	//	*EventMessage_LayerHandlerStatus
 	MessageType   isEventMessage_MessageType `protobuf_oneof:"message_type"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -131,6 +134,33 @@ func (x *EventMessage) GetServiceHandlerStatus() *ServiceHandlerStatus {
 	return nil
 }
 
+func (x *EventMessage) GetSubscribeLayerEvent() *SubscribeLayerEvent {
+	if x != nil {
+		if x, ok := x.MessageType.(*EventMessage_SubscribeLayerEvent); ok {
+			return x.SubscribeLayerEvent
+		}
+	}
+	return nil
+}
+
+func (x *EventMessage) GetInvokeLayerHandler() *InvokeLayerHandler {
+	if x != nil {
+		if x, ok := x.MessageType.(*EventMessage_InvokeLayerHandler); ok {
+			return x.InvokeLayerHandler
+		}
+	}
+	return nil
+}
+
+func (x *EventMessage) GetLayerHandlerStatus() *LayerHandlerStatus {
+	if x != nil {
+		if x, ok := x.MessageType.(*EventMessage_LayerHandlerStatus); ok {
+			return x.LayerHandlerStatus
+		}
+	}
+	return nil
+}
+
 type isEventMessage_MessageType interface {
 	isEventMessage_MessageType()
 }
@@ -159,6 +189,18 @@ type EventMessage_ServiceHandlerStatus struct {
 	ServiceHandlerStatus *ServiceHandlerStatus `protobuf:"bytes,6,opt,name=service_handler_status,json=serviceHandlerStatus,proto3,oneof"`
 }
 
+type EventMessage_SubscribeLayerEvent struct {
+	SubscribeLayerEvent *SubscribeLayerEvent `protobuf:"bytes,8,opt,name=subscribe_layer_event,json=subscribeLayerEvent,proto3,oneof"`
+}
+
+type EventMessage_InvokeLayerHandler struct {
+	InvokeLayerHandler *InvokeLayerHandler `protobuf:"bytes,9,opt,name=invoke_layer_handler,json=invokeLayerHandler,proto3,oneof"`
+}
+
+type EventMessage_LayerHandlerStatus struct {
+	LayerHandlerStatus *LayerHandlerStatus `protobuf:"bytes,10,opt,name=layer_handler_status,json=layerHandlerStatus,proto3,oneof"`
+}
+
 func (*EventMessage_SubscribeProjectEvent) isEventMessage_MessageType() {}
 
 func (*EventMessage_InvokeProjectHandler) isEventMessage_MessageType() {}
@@ -170,6 +212,12 @@ func (*EventMessage_SubscribeServiceEvent) isEventMessage_MessageType() {}
 func (*EventMessage_InvokeServiceHandler) isEventMessage_MessageType() {}
 
 func (*EventMessage_ServiceHandlerStatus) isEventMessage_MessageType() {}
+
+func (*EventMessage_SubscribeLayerEvent) isEventMessage_MessageType() {}
+
+func (*EventMessage_InvokeLayerHandler) isEventMessage_MessageType() {}
+
+func (*EventMessage_LayerHandlerStatus) isEventMessage_MessageType() {}
 
 // Client subscribes to project-related events
 type SubscribeProjectEvent struct {
@@ -279,20 +327,135 @@ func (x *SubscribeServiceEvent) GetHost() string {
 	return ""
 }
 
+// Client subscribes to layer-related events.
+type SubscribeLayerEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventNames    []string               `protobuf:"bytes,1,rep,name=event_names,json=eventNames,proto3" json:"event_names,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubscribeLayerEvent) Reset() {
+	*x = SubscribeLayerEvent{}
+	mi := &file_event_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribeLayerEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribeLayerEvent) ProtoMessage() {}
+
+func (x *SubscribeLayerEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_event_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribeLayerEvent.ProtoReflect.Descriptor instead.
+func (*SubscribeLayerEvent) Descriptor() ([]byte, []int) {
+	return file_event_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SubscribeLayerEvent) GetEventNames() []string {
+	if x != nil {
+		return x.EventNames
+	}
+	return nil
+}
+
+// ExecutionScope describes the layers and services selected for one command.
+type ExecutionScope struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	TargetLayers        []string               `protobuf:"bytes,1,rep,name=target_layers,json=targetLayers,proto3" json:"target_layers,omitempty"`
+	IncludedLayers      []string               `protobuf:"bytes,2,rep,name=included_layers,json=includedLayers,proto3" json:"included_layers,omitempty"`
+	ServiceNames        []string               `protobuf:"bytes,3,rep,name=service_names,json=serviceNames,proto3" json:"service_names,omitempty"`
+	IncludeDependencies bool                   `protobuf:"varint,4,opt,name=include_dependencies,json=includeDependencies,proto3" json:"include_dependencies,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *ExecutionScope) Reset() {
+	*x = ExecutionScope{}
+	mi := &file_event_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecutionScope) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecutionScope) ProtoMessage() {}
+
+func (x *ExecutionScope) ProtoReflect() protoreflect.Message {
+	mi := &file_event_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecutionScope.ProtoReflect.Descriptor instead.
+func (*ExecutionScope) Descriptor() ([]byte, []int) {
+	return file_event_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ExecutionScope) GetTargetLayers() []string {
+	if x != nil {
+		return x.TargetLayers
+	}
+	return nil
+}
+
+func (x *ExecutionScope) GetIncludedLayers() []string {
+	if x != nil {
+		return x.IncludedLayers
+	}
+	return nil
+}
+
+func (x *ExecutionScope) GetServiceNames() []string {
+	if x != nil {
+		return x.ServiceNames
+	}
+	return nil
+}
+
+func (x *ExecutionScope) GetIncludeDependencies() bool {
+	if x != nil {
+		return x.IncludeDependencies
+	}
+	return false
+}
+
 // Server invokes the project event handler
 type InvokeProjectHandler struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Name of the event being invoked.
 	EventName string `protobuf:"bytes,1,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
 	// Current project configuration.
-	Project       *ProjectConfig `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
+	Project       *ProjectConfig  `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
+	Scope         *ExecutionScope `protobuf:"bytes,3,opt,name=scope,proto3" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InvokeProjectHandler) Reset() {
 	*x = InvokeProjectHandler{}
-	mi := &file_event_proto_msgTypes[3]
+	mi := &file_event_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -304,7 +467,7 @@ func (x *InvokeProjectHandler) String() string {
 func (*InvokeProjectHandler) ProtoMessage() {}
 
 func (x *InvokeProjectHandler) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[3]
+	mi := &file_event_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -317,7 +480,7 @@ func (x *InvokeProjectHandler) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeProjectHandler.ProtoReflect.Descriptor instead.
 func (*InvokeProjectHandler) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{3}
+	return file_event_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InvokeProjectHandler) GetEventName() string {
@@ -330,6 +493,82 @@ func (x *InvokeProjectHandler) GetEventName() string {
 func (x *InvokeProjectHandler) GetProject() *ProjectConfig {
 	if x != nil {
 		return x.Project
+	}
+	return nil
+}
+
+func (x *InvokeProjectHandler) GetScope() *ExecutionScope {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+// Server invokes a layer event handler.
+type InvokeLayerHandler struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventName     string                 `protobuf:"bytes,1,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
+	Project       *ProjectConfig         `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
+	Layer         *Layer                 `protobuf:"bytes,3,opt,name=layer,proto3" json:"layer,omitempty"`
+	Scope         *ExecutionScope        `protobuf:"bytes,4,opt,name=scope,proto3" json:"scope,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InvokeLayerHandler) Reset() {
+	*x = InvokeLayerHandler{}
+	mi := &file_event_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InvokeLayerHandler) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InvokeLayerHandler) ProtoMessage() {}
+
+func (x *InvokeLayerHandler) ProtoReflect() protoreflect.Message {
+	mi := &file_event_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InvokeLayerHandler.ProtoReflect.Descriptor instead.
+func (*InvokeLayerHandler) Descriptor() ([]byte, []int) {
+	return file_event_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *InvokeLayerHandler) GetEventName() string {
+	if x != nil {
+		return x.EventName
+	}
+	return ""
+}
+
+func (x *InvokeLayerHandler) GetProject() *ProjectConfig {
+	if x != nil {
+		return x.Project
+	}
+	return nil
+}
+
+func (x *InvokeLayerHandler) GetLayer() *Layer {
+	if x != nil {
+		return x.Layer
+	}
+	return nil
+}
+
+func (x *InvokeLayerHandler) GetScope() *ExecutionScope {
+	if x != nil {
+		return x.Scope
 	}
 	return nil
 }
@@ -351,7 +590,7 @@ type InvokeServiceHandler struct {
 
 func (x *InvokeServiceHandler) Reset() {
 	*x = InvokeServiceHandler{}
-	mi := &file_event_proto_msgTypes[4]
+	mi := &file_event_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -363,7 +602,7 @@ func (x *InvokeServiceHandler) String() string {
 func (*InvokeServiceHandler) ProtoMessage() {}
 
 func (x *InvokeServiceHandler) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[4]
+	mi := &file_event_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -376,7 +615,7 @@ func (x *InvokeServiceHandler) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeServiceHandler.ProtoReflect.Descriptor instead.
 func (*InvokeServiceHandler) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{4}
+	return file_event_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *InvokeServiceHandler) GetEventName() string {
@@ -425,7 +664,7 @@ type ProjectHandlerStatus struct {
 
 func (x *ProjectHandlerStatus) Reset() {
 	*x = ProjectHandlerStatus{}
-	mi := &file_event_proto_msgTypes[5]
+	mi := &file_event_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -437,7 +676,7 @@ func (x *ProjectHandlerStatus) String() string {
 func (*ProjectHandlerStatus) ProtoMessage() {}
 
 func (x *ProjectHandlerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[5]
+	mi := &file_event_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -450,7 +689,7 @@ func (x *ProjectHandlerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectHandlerStatus.ProtoReflect.Descriptor instead.
 func (*ProjectHandlerStatus) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{5}
+	return file_event_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ProjectHandlerStatus) GetEventName() string {
@@ -501,7 +740,7 @@ type ServiceHandlerStatus struct {
 
 func (x *ServiceHandlerStatus) Reset() {
 	*x = ServiceHandlerStatus{}
-	mi := &file_event_proto_msgTypes[6]
+	mi := &file_event_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -513,7 +752,7 @@ func (x *ServiceHandlerStatus) String() string {
 func (*ServiceHandlerStatus) ProtoMessage() {}
 
 func (x *ServiceHandlerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[6]
+	mi := &file_event_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -526,7 +765,7 @@ func (x *ServiceHandlerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceHandlerStatus.ProtoReflect.Descriptor instead.
 func (*ServiceHandlerStatus) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{6}
+	return file_event_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ServiceHandlerStatus) GetEventName() string {
@@ -564,18 +803,99 @@ func (x *ServiceHandlerStatus) GetError() *ExtensionError {
 	return nil
 }
 
+// Client sends status updates for layer events.
+type LayerHandlerStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventName     string                 `protobuf:"bytes,1,opt,name=event_name,json=eventName,proto3" json:"event_name,omitempty"`
+	LayerName     string                 `protobuf:"bytes,2,opt,name=layer_name,json=layerName,proto3" json:"layer_name,omitempty"`
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	Message       string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	Error         *ExtensionError        `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LayerHandlerStatus) Reset() {
+	*x = LayerHandlerStatus{}
+	mi := &file_event_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LayerHandlerStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LayerHandlerStatus) ProtoMessage() {}
+
+func (x *LayerHandlerStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_event_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LayerHandlerStatus.ProtoReflect.Descriptor instead.
+func (*LayerHandlerStatus) Descriptor() ([]byte, []int) {
+	return file_event_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *LayerHandlerStatus) GetEventName() string {
+	if x != nil {
+		return x.EventName
+	}
+	return ""
+}
+
+func (x *LayerHandlerStatus) GetLayerName() string {
+	if x != nil {
+		return x.LayerName
+	}
+	return ""
+}
+
+func (x *LayerHandlerStatus) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *LayerHandlerStatus) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *LayerHandlerStatus) GetError() *ExtensionError {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
 var File_event_proto protoreflect.FileDescriptor
 
 const file_event_proto_rawDesc = "" +
 	"\n" +
-	"\vevent.proto\x12\x06azdext\x1a\fmodels.proto\x1a\ferrors.proto\"\xa8\x04\n" +
+	"\vevent.proto\x12\x06azdext\x1a\fmodels.proto\x1a\ferrors.proto\x1a\rproject.proto\"\x9b\x06\n" +
 	"\fEventMessage\x12W\n" +
 	"\x17subscribe_project_event\x18\x01 \x01(\v2\x1d.azdext.SubscribeProjectEventH\x00R\x15subscribeProjectEvent\x12T\n" +
 	"\x16invoke_project_handler\x18\x02 \x01(\v2\x1c.azdext.InvokeProjectHandlerH\x00R\x14invokeProjectHandler\x12T\n" +
 	"\x16project_handler_status\x18\x03 \x01(\v2\x1c.azdext.ProjectHandlerStatusH\x00R\x14projectHandlerStatus\x12W\n" +
 	"\x17subscribe_service_event\x18\x04 \x01(\v2\x1d.azdext.SubscribeServiceEventH\x00R\x15subscribeServiceEvent\x12T\n" +
 	"\x16invoke_service_handler\x18\x05 \x01(\v2\x1c.azdext.InvokeServiceHandlerH\x00R\x14invokeServiceHandler\x12T\n" +
-	"\x16service_handler_status\x18\x06 \x01(\v2\x1c.azdext.ServiceHandlerStatusH\x00R\x14serviceHandlerStatusB\x0e\n" +
+	"\x16service_handler_status\x18\x06 \x01(\v2\x1c.azdext.ServiceHandlerStatusH\x00R\x14serviceHandlerStatus\x12Q\n" +
+	"\x15subscribe_layer_event\x18\b \x01(\v2\x1b.azdext.SubscribeLayerEventH\x00R\x13subscribeLayerEvent\x12N\n" +
+	"\x14invoke_layer_handler\x18\t \x01(\v2\x1a.azdext.InvokeLayerHandlerH\x00R\x12invokeLayerHandler\x12N\n" +
+	"\x14layer_handler_status\x18\n" +
+	" \x01(\v2\x1a.azdext.LayerHandlerStatusH\x00R\x12layerHandlerStatusB\x0e\n" +
 	"\fmessage_type\"8\n" +
 	"\x15SubscribeProjectEvent\x12\x1f\n" +
 	"\vevent_names\x18\x01 \x03(\tR\n" +
@@ -584,11 +904,26 @@ const file_event_proto_rawDesc = "" +
 	"\vevent_names\x18\x01 \x03(\tR\n" +
 	"eventNames\x12\x1a\n" +
 	"\blanguage\x18\x02 \x01(\tR\blanguage\x12\x12\n" +
-	"\x04host\x18\x03 \x01(\tR\x04host\"f\n" +
+	"\x04host\x18\x03 \x01(\tR\x04host\"6\n" +
+	"\x13SubscribeLayerEvent\x12\x1f\n" +
+	"\vevent_names\x18\x01 \x03(\tR\n" +
+	"eventNames\"\xb6\x01\n" +
+	"\x0eExecutionScope\x12#\n" +
+	"\rtarget_layers\x18\x01 \x03(\tR\ftargetLayers\x12'\n" +
+	"\x0fincluded_layers\x18\x02 \x03(\tR\x0eincludedLayers\x12#\n" +
+	"\rservice_names\x18\x03 \x03(\tR\fserviceNames\x121\n" +
+	"\x14include_dependencies\x18\x04 \x01(\bR\x13includeDependencies\"\x94\x01\n" +
 	"\x14InvokeProjectHandler\x12\x1d\n" +
 	"\n" +
 	"event_name\x18\x01 \x01(\tR\teventName\x12/\n" +
-	"\aproject\x18\x02 \x01(\v2\x15.azdext.ProjectConfigR\aproject\"\xd8\x01\n" +
+	"\aproject\x18\x02 \x01(\v2\x15.azdext.ProjectConfigR\aproject\x12,\n" +
+	"\x05scope\x18\x03 \x01(\v2\x16.azdext.ExecutionScopeR\x05scope\"\xb7\x01\n" +
+	"\x12InvokeLayerHandler\x12\x1d\n" +
+	"\n" +
+	"event_name\x18\x01 \x01(\tR\teventName\x12/\n" +
+	"\aproject\x18\x02 \x01(\v2\x15.azdext.ProjectConfigR\aproject\x12#\n" +
+	"\x05layer\x18\x03 \x01(\v2\r.azdext.LayerR\x05layer\x12,\n" +
+	"\x05scope\x18\x04 \x01(\v2\x16.azdext.ExecutionScopeR\x05scope\"\xd8\x01\n" +
 	"\x14InvokeServiceHandler\x12\x1d\n" +
 	"\n" +
 	"event_name\x18\x01 \x01(\tR\teventName\x12/\n" +
@@ -607,6 +942,14 @@ const file_event_proto_rawDesc = "" +
 	"\fservice_name\x18\x02 \x01(\tR\vserviceName\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12,\n" +
+	"\x05error\x18\x05 \x01(\v2\x16.azdext.ExtensionErrorR\x05error\"\xb2\x01\n" +
+	"\x12LayerHandlerStatus\x12\x1d\n" +
+	"\n" +
+	"event_name\x18\x01 \x01(\tR\teventName\x12\x1d\n" +
+	"\n" +
+	"layer_name\x18\x02 \x01(\tR\tlayerName\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\x12,\n" +
 	"\x05error\x18\x05 \x01(\v2\x16.azdext.ExtensionErrorR\x05error2M\n" +
 	"\fEventService\x12=\n" +
 	"\vEventStream\x12\x14.azdext.EventMessage\x1a\x14.azdext.EventMessage(\x010\x01B/Z-github.com/azure/azure-dev/cli/azd/pkg/azdextb\x06proto3"
@@ -623,40 +966,53 @@ func file_event_proto_rawDescGZIP() []byte {
 	return file_event_proto_rawDescData
 }
 
-var file_event_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_event_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_event_proto_goTypes = []any{
 	(*EventMessage)(nil),          // 0: azdext.EventMessage
 	(*SubscribeProjectEvent)(nil), // 1: azdext.SubscribeProjectEvent
 	(*SubscribeServiceEvent)(nil), // 2: azdext.SubscribeServiceEvent
-	(*InvokeProjectHandler)(nil),  // 3: azdext.InvokeProjectHandler
-	(*InvokeServiceHandler)(nil),  // 4: azdext.InvokeServiceHandler
-	(*ProjectHandlerStatus)(nil),  // 5: azdext.ProjectHandlerStatus
-	(*ServiceHandlerStatus)(nil),  // 6: azdext.ServiceHandlerStatus
-	(*ProjectConfig)(nil),         // 7: azdext.ProjectConfig
-	(*ServiceConfig)(nil),         // 8: azdext.ServiceConfig
-	(*ServiceContext)(nil),        // 9: azdext.ServiceContext
-	(*ExtensionError)(nil),        // 10: azdext.ExtensionError
+	(*SubscribeLayerEvent)(nil),   // 3: azdext.SubscribeLayerEvent
+	(*ExecutionScope)(nil),        // 4: azdext.ExecutionScope
+	(*InvokeProjectHandler)(nil),  // 5: azdext.InvokeProjectHandler
+	(*InvokeLayerHandler)(nil),    // 6: azdext.InvokeLayerHandler
+	(*InvokeServiceHandler)(nil),  // 7: azdext.InvokeServiceHandler
+	(*ProjectHandlerStatus)(nil),  // 8: azdext.ProjectHandlerStatus
+	(*ServiceHandlerStatus)(nil),  // 9: azdext.ServiceHandlerStatus
+	(*LayerHandlerStatus)(nil),    // 10: azdext.LayerHandlerStatus
+	(*ProjectConfig)(nil),         // 11: azdext.ProjectConfig
+	(*Layer)(nil),                 // 12: azdext.Layer
+	(*ServiceConfig)(nil),         // 13: azdext.ServiceConfig
+	(*ServiceContext)(nil),        // 14: azdext.ServiceContext
+	(*ExtensionError)(nil),        // 15: azdext.ExtensionError
 }
 var file_event_proto_depIdxs = []int32{
 	1,  // 0: azdext.EventMessage.subscribe_project_event:type_name -> azdext.SubscribeProjectEvent
-	3,  // 1: azdext.EventMessage.invoke_project_handler:type_name -> azdext.InvokeProjectHandler
-	5,  // 2: azdext.EventMessage.project_handler_status:type_name -> azdext.ProjectHandlerStatus
+	5,  // 1: azdext.EventMessage.invoke_project_handler:type_name -> azdext.InvokeProjectHandler
+	8,  // 2: azdext.EventMessage.project_handler_status:type_name -> azdext.ProjectHandlerStatus
 	2,  // 3: azdext.EventMessage.subscribe_service_event:type_name -> azdext.SubscribeServiceEvent
-	4,  // 4: azdext.EventMessage.invoke_service_handler:type_name -> azdext.InvokeServiceHandler
-	6,  // 5: azdext.EventMessage.service_handler_status:type_name -> azdext.ServiceHandlerStatus
-	7,  // 6: azdext.InvokeProjectHandler.project:type_name -> azdext.ProjectConfig
-	7,  // 7: azdext.InvokeServiceHandler.project:type_name -> azdext.ProjectConfig
-	8,  // 8: azdext.InvokeServiceHandler.service:type_name -> azdext.ServiceConfig
-	9,  // 9: azdext.InvokeServiceHandler.service_context:type_name -> azdext.ServiceContext
-	10, // 10: azdext.ProjectHandlerStatus.error:type_name -> azdext.ExtensionError
-	10, // 11: azdext.ServiceHandlerStatus.error:type_name -> azdext.ExtensionError
-	0,  // 12: azdext.EventService.EventStream:input_type -> azdext.EventMessage
-	0,  // 13: azdext.EventService.EventStream:output_type -> azdext.EventMessage
-	13, // [13:14] is the sub-list for method output_type
-	12, // [12:13] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	7,  // 4: azdext.EventMessage.invoke_service_handler:type_name -> azdext.InvokeServiceHandler
+	9,  // 5: azdext.EventMessage.service_handler_status:type_name -> azdext.ServiceHandlerStatus
+	3,  // 6: azdext.EventMessage.subscribe_layer_event:type_name -> azdext.SubscribeLayerEvent
+	6,  // 7: azdext.EventMessage.invoke_layer_handler:type_name -> azdext.InvokeLayerHandler
+	10, // 8: azdext.EventMessage.layer_handler_status:type_name -> azdext.LayerHandlerStatus
+	11, // 9: azdext.InvokeProjectHandler.project:type_name -> azdext.ProjectConfig
+	4,  // 10: azdext.InvokeProjectHandler.scope:type_name -> azdext.ExecutionScope
+	11, // 11: azdext.InvokeLayerHandler.project:type_name -> azdext.ProjectConfig
+	12, // 12: azdext.InvokeLayerHandler.layer:type_name -> azdext.Layer
+	4,  // 13: azdext.InvokeLayerHandler.scope:type_name -> azdext.ExecutionScope
+	11, // 14: azdext.InvokeServiceHandler.project:type_name -> azdext.ProjectConfig
+	13, // 15: azdext.InvokeServiceHandler.service:type_name -> azdext.ServiceConfig
+	14, // 16: azdext.InvokeServiceHandler.service_context:type_name -> azdext.ServiceContext
+	15, // 17: azdext.ProjectHandlerStatus.error:type_name -> azdext.ExtensionError
+	15, // 18: azdext.ServiceHandlerStatus.error:type_name -> azdext.ExtensionError
+	15, // 19: azdext.LayerHandlerStatus.error:type_name -> azdext.ExtensionError
+	0,  // 20: azdext.EventService.EventStream:input_type -> azdext.EventMessage
+	0,  // 21: azdext.EventService.EventStream:output_type -> azdext.EventMessage
+	21, // [21:22] is the sub-list for method output_type
+	20, // [20:21] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_event_proto_init() }
@@ -666,6 +1022,7 @@ func file_event_proto_init() {
 	}
 	file_models_proto_init()
 	file_errors_proto_init()
+	file_project_proto_init()
 	file_event_proto_msgTypes[0].OneofWrappers = []any{
 		(*EventMessage_SubscribeProjectEvent)(nil),
 		(*EventMessage_InvokeProjectHandler)(nil),
@@ -673,6 +1030,9 @@ func file_event_proto_init() {
 		(*EventMessage_SubscribeServiceEvent)(nil),
 		(*EventMessage_InvokeServiceHandler)(nil),
 		(*EventMessage_ServiceHandlerStatus)(nil),
+		(*EventMessage_SubscribeLayerEvent)(nil),
+		(*EventMessage_InvokeLayerHandler)(nil),
+		(*EventMessage_LayerHandlerStatus)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -680,7 +1040,7 @@ func file_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_event_proto_rawDesc), len(file_event_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

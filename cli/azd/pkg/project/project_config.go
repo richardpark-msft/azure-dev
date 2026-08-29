@@ -44,6 +44,7 @@ type ProjectConfig struct {
 	AdditionalProperties map[string]any `yaml:",inline"`
 
 	*ext.EventDispatcher[ProjectLifecycleEventArgs] `yaml:"-"`
+	LayerEventDispatcher                            *ext.EventDispatcher[LayerLifecycleEventArgs] `yaml:"-"`
 }
 
 // RequiredVersions contains information about what versions of tools this project requires.
@@ -88,6 +89,9 @@ func (pc *ProjectConfig) CopyRuntimeStateTo(target *ProjectConfig) {
 
 	if pc.EventDispatcher != nil {
 		target.EventDispatcher = pc.EventDispatcher
+	}
+	if pc.LayerEventDispatcher != nil {
+		target.LayerEventDispatcher = pc.LayerEventDispatcher
 	}
 
 	if pc.Services == nil || target.Services == nil {

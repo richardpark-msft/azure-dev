@@ -148,6 +148,46 @@ func TestNonexistentUses(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestLayerDeployServiceDependencies(t *testing.T) {
+	t.Parallel()
+
+	aiProject := &project.ServiceConfig{Name: "ai-project", Layer: "foundry"}
+	toolbox := &project.ServiceConfig{Name: "toolbox", Layer: "foundry"}
+	writer := &project.ServiceConfig{Name: "writer", Layer: "agents"}
+	layers := []*project.Layer{
+		{Name: "foundry", Services: []*project.ServiceConfig{aiProject, toolbox}},
+		{Name: "agents", Services: []*project.ServiceConfig{writer}, DependsOn: []string{"foundry"}},
+	}
+
+	resolve := layerDeployServiceDependencies(layers, []*project.ServiceConfig{aiProject, toolbox, writer})
+	require.Equal(t, []string{"ai-project", "toolbox"}, resolve(writer))
+	require.Empty(t, resolve(aiProject))
+
+	exactResolve := layerDeployServiceDependencies(layers, []*project.ServiceConfig{writer})
+	require.Empty(t, exactResolve(writer), "excluded dependency layers must not create missing graph edges")
+}
+
+func TestServiceGraph_LayerDeployDependencies(t *testing.T) {
+	t.Parallel()
+
+	services := []*project.ServiceConfig{
+		{Name: "ai-project", Layer: "foundry"},
+		{Name: "writer", Layer: "agents", DependsOn: []string{"foundry"}},
+	}
+	opts, graph := newGraphOpts(services)
+	opts.deployServiceDeps = func(service *project.ServiceConfig) []string {
+		if service.Name == "writer" {
+			return []string{"ai-project"}
+		}
+		return nil
+	}
+
+	_, err := addServiceStepsToGraph(graph, opts)
+
+	require.NoError(t, err)
+	require.NoError(t, graph.Validate())
+}
+
 // TestSequentialFallback verifies that when no service declares a uses:
 // edge targeting another service, deploy steps are chained sequentially
 // in slice order for backward compatibility with templates that relied

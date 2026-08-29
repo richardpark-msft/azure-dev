@@ -143,6 +143,8 @@ func (u *UpGraphAction) Run(
 	deployFlags *DeployFlags,
 	parentFlags *pflag.FlagSet,
 	startTime time.Time,
+	selectedServices map[string]struct{},
+	executionScope project.ExecutionScope,
 ) (*actions.ActionResult, error) {
 	// Emit synthetic cmd.package and cmd.provision spans as children of the
 	// parent cmd.up span. The legacy `azd up` workflow runner spawned
@@ -272,11 +274,15 @@ func (u *UpGraphAction) Run(
 	}
 
 	// 2. Initialize project and enumerate services.
-	stableServices, err := u.initializeServices(ctx)
+	stableServices, err := u.initializeServices(ctx, selectedServices)
 	if err != nil {
 		return nil, err
 	}
 	maxConcurrency := u.resolveDAGConcurrency()
+	logicalLayers, err := u.importManager.ListLayers(ctx, u.projectConfig)
+	if err != nil {
+		return nil, fmt.Errorf("resolving project layers: %w", err)
+	}
 
 	// 3. Resolve deploy timeout (honors --timeout flag and AZD_DEPLOY_TIMEOUT
 	// env var for parity with stand-alone `azd deploy`).
@@ -320,7 +326,7 @@ func (u *UpGraphAction) Run(
 	// ── provision layers ── depend on cmdhook-preprovision + bicep-inferred
 	// predecessors.
 	provisionSinks, err := u.addProvisionSteps(
-		g, layers, layerDeps, preProvisionHookStep, safeCon, &envMu,
+		g, layers, layerDeps, preProvisionHookStep, safeCon, &envMu, executionScope,
 	)
 	if err != nil {
 		return nil, err
@@ -362,6 +368,7 @@ func (u *UpGraphAction) Run(
 	// ── service steps (package / publish / deploy) + deploy events ──
 	projectEventArgs := project.ProjectLifecycleEventArgs{
 		Project: u.projectConfig,
+		Args:    map[string]any{ProjectEventKeyExecutionScope: executionScope},
 	}
 
 	// ── cmdhook-prepackage ── runs the project-level `prepackage` shell
@@ -429,10 +436,11 @@ func (u *UpGraphAction) Run(
 		packagePublishBuildGateKey: dotNetPackagePublishBuildGateKey,
 		buildGateKey:               aspireBuildGateKey,
 		// `azd up` never takes a --from-package flag; leave empty.
-		fromPackage:      "",
-		packageExtraDeps: []string{prePackageEventStep},
-		publishExtraDeps: []string{preDeployEventStep},
-		state:            state,
+		fromPackage:       "",
+		packageExtraDeps:  []string{prePackageEventStep},
+		publishExtraDeps:  []string{preDeployEventStep},
+		deployServiceDeps: layerDeployServiceDependencies(logicalLayers, stableServices),
+		state:             state,
 		onDeployTimeout: func(cbCtx context.Context, svc *project.ServiceConfig) {
 			safeCon.MessageUxItem(cbCtx, deployTimeoutWarning(svc.Name, deployTimeout))
 		},
@@ -724,6 +732,36 @@ func (u *UpGraphAction) Run(
 	}, nil
 }
 
+func layerDeployServiceDependencies(
+	layers []*project.Layer,
+	selectedServices []*project.ServiceConfig,
+) func(*project.ServiceConfig) []string {
+	selected := make(map[string]struct{}, len(selectedServices))
+	for _, service := range selectedServices {
+		selected[service.Name] = struct{}{}
+	}
+
+	servicesByLayer := make(map[string][]string, len(layers))
+	dependenciesByLayer := make(map[string][]string, len(layers))
+	for _, layer := range layers {
+		dependenciesByLayer[layer.Name] = layer.DependsOn
+		for _, service := range layer.Services {
+			if _, has := selected[service.Name]; has {
+				servicesByLayer[layer.Name] = append(servicesByLayer[layer.Name], service.Name)
+			}
+		}
+		slices.Sort(servicesByLayer[layer.Name])
+	}
+
+	return func(service *project.ServiceConfig) []string {
+		var dependencies []string
+		for _, dependencyLayer := range dependenciesByLayer[service.Layer] {
+			dependencies = append(dependencies, servicesByLayer[dependencyLayer]...)
+		}
+		return dependencies
+	}
+}
+
 // phaseTimingBreakdown computes wall-clock durations for provisioning and deploying phases
 // by finding the earliest start and latest end among matching steps.
 // Package/publish steps run concurrently with provisioning, so they are excluded from the
@@ -805,8 +843,18 @@ func changedFlagNames(fs *pflag.FlagSet) []string {
 
 // initializeServices enumerates services, initializes the project, and ensures
 // that required service target tools are available.
-func (u *UpGraphAction) initializeServices(ctx context.Context) ([]*project.ServiceConfig, error) {
+func (u *UpGraphAction) initializeServices(
+	ctx context.Context,
+	selectedServices map[string]struct{},
+) ([]*project.ServiceConfig, error) {
 	stableServices, err := u.importManager.ServiceStableFiltered(ctx, u.projectConfig, "", u.env.Getenv)
+	if selectedServices != nil {
+		stableServices = slices.DeleteFunc(stableServices, func(service *project.ServiceConfig) bool {
+			_, selected := selectedServices[service.Name]
+			return !selected
+		})
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("enumerating services: %w", err)
 	}
@@ -815,9 +863,7 @@ func (u *UpGraphAction) initializeServices(ctx context.Context) ([]*project.Serv
 		return nil, fmt.Errorf("initializing project: %w", err)
 	}
 
-	if err := u.projectManager.EnsureServiceTargetTools(
-		ctx, stableServices,
-	); err != nil {
+	if err := u.projectManager.EnsureServiceTargetTools(ctx, stableServices); err != nil {
 		return nil, fmt.Errorf("ensuring service tools: %w", err)
 	}
 
@@ -837,6 +883,7 @@ func (u *UpGraphAction) addProvisionSteps(
 	preProvisionHookStep string,
 	safeCon *syncConsole,
 	envMu *sync.Mutex,
+	executionScope project.ExecutionScope,
 ) (provisionSinks []string, err error) {
 	if len(layers) == 0 {
 		return []string{preProvisionHookStep}, nil
@@ -855,6 +902,7 @@ func (u *UpGraphAction) addProvisionSteps(
 		commandRunner:       u.commandRunner,
 		importManager:       u.importManager,
 		hookMu:              &sync.Mutex{},
+		executionScope:      executionScope,
 	}
 
 	// Compute all step names first so that dependency wiring can reference any

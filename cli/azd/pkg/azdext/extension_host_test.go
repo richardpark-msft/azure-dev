@@ -111,6 +111,15 @@ func (m *MockExtensionEventManager) AddProjectEventHandler(
 	return args.Error(0)
 }
 
+func (m *MockExtensionEventManager) AddLayerEventHandler(
+	ctx context.Context,
+	eventName string,
+	handler LayerEventHandler,
+) error {
+	args := m.Called(ctx, eventName, handler)
+	return args.Error(0)
+}
+
 func (m *MockExtensionEventManager) AddServiceEventHandler(
 	ctx context.Context,
 	eventName string,

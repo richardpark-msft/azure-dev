@@ -737,6 +737,39 @@ func Test_ServiceManager_CacheResults_Across_Instances(t *testing.T) {
 	require.Same(t, packageResult1, packageResult2)
 }
 
+func Test_ServiceManager_CacheResults_AreScopedToLayer(t *testing.T) {
+	mockContext := mocks.NewMockContext(t.Context())
+	setupMocksForServiceManager(mockContext)
+	env := environment.New("test")
+	operationCache := ServiceOperationCache{}
+
+	packageCalled := new(false)
+	ctx := context.WithValue(*mockContext.Context, serviceTargetPackageCalled, packageCalled)
+
+	backendService := createTestServiceConfig("./src/api", ServiceTargetFake, ServiceLanguageFake)
+	backendService.Layer = "backend"
+	backendManager := createServiceManager(mockContext, env, operationCache)
+	_, err := logProgress(
+		t, func(progress *async.Progress[ServiceProgress]) (*ServicePackageResult, error) {
+			return backendManager.Package(ctx, backendService, nil, progress, nil)
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, *packageCalled)
+
+	*packageCalled = false
+	frontendService := createTestServiceConfig("./src/api", ServiceTargetFake, ServiceLanguageFake)
+	frontendService.Layer = "frontend"
+	frontendManager := createServiceManager(mockContext, env, operationCache)
+	_, err = logProgress(
+		t, func(progress *async.Progress[ServiceProgress]) (*ServicePackageResult, error) {
+			return frontendManager.Package(ctx, frontendService, nil, progress, nil)
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, *packageCalled)
+}
+
 func Test_ServiceManager_Events_With_Errors(t *testing.T) {
 	tests := []struct {
 		name      string

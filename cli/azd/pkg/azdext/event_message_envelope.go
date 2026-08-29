@@ -74,6 +74,15 @@ func (ops *EventMessageEnvelope) GetRequestId(ctx context.Context, msg *EventMes
 	case *InvokeServiceHandler:
 		// Server-sent invoke messages use same correlation as status responses
 		return fmt.Sprintf("%s.%s.%s", extensionId, v.Service.Name, v.EventName)
+	case *SubscribeLayerEvent:
+		if len(v.EventNames) > 0 {
+			return fmt.Sprintf("%s.%s", extensionId, v.EventNames[0])
+		}
+		return ""
+	case *LayerHandlerStatus:
+		return fmt.Sprintf("%s.%s.%s", extensionId, v.LayerName, v.EventName)
+	case *InvokeLayerHandler:
+		return fmt.Sprintf("%s.%s.%s", extensionId, v.Layer.Name, v.EventName)
 	}
 
 	return ""
@@ -112,6 +121,12 @@ func (ops *EventMessageEnvelope) GetInnerMessage(msg *EventMessage) any {
 		return m.InvokeServiceHandler
 	case *EventMessage_ServiceHandlerStatus:
 		return m.ServiceHandlerStatus
+	case *EventMessage_SubscribeLayerEvent:
+		return m.SubscribeLayerEvent
+	case *EventMessage_InvokeLayerHandler:
+		return m.InvokeLayerHandler
+	case *EventMessage_LayerHandlerStatus:
+		return m.LayerHandlerStatus
 	default:
 		// Return nil for unhandled message types
 		return nil

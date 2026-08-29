@@ -8,6 +8,7 @@ option go_package = "github.com/azure/azure-dev/cli/azd/pkg/azdext";
 
 import "models.proto";
 import "errors.proto";
+import "project.proto";
 
 // EventService defines methods for event subscription, invocation, and status updates.
 // Clients can subscribe to events and receive notifications via a bidirectional stream.
@@ -25,6 +26,9 @@ message EventMessage {
     SubscribeServiceEvent subscribe_service_event = 4;
     InvokeServiceHandler invoke_service_handler = 5;
     ServiceHandlerStatus service_handler_status = 6;
+    SubscribeLayerEvent subscribe_layer_event = 8;
+    InvokeLayerHandler invoke_layer_handler = 9;
+    LayerHandlerStatus layer_handler_status = 10;
   }
 }
 
@@ -42,12 +46,34 @@ message SubscribeServiceEvent {
   string host = 3;
 }
 
+// Client subscribes to layer-related events.
+message SubscribeLayerEvent {
+  repeated string event_names = 1;
+}
+
+// ExecutionScope describes the layers and services selected for one command.
+message ExecutionScope {
+  repeated string target_layers = 1;
+  repeated string included_layers = 2;
+  repeated string service_names = 3;
+  bool include_dependencies = 4;
+}
+
 // Server invokes the project event handler
 message InvokeProjectHandler {
   // Name of the event being invoked.
   string event_name = 1;
   // Current project configuration.
   ProjectConfig project = 2;
+  ExecutionScope scope = 3;
+}
+
+// Server invokes a layer event handler.
+message InvokeLayerHandler {
+  string event_name = 1;
+  ProjectConfig project = 2;
+  Layer layer = 3;
+  ExecutionScope scope = 4;
 }
 
 // Server invokes the service event handler
@@ -87,5 +113,14 @@ message ServiceHandlerStatus {
   // For backward compatibility with older hosts, populate this even when error is set.
   string message = 4;
   // Optional structured error details (set when status is "failed").
+  ExtensionError error = 5;
+}
+
+// Client sends status updates for layer events.
+message LayerHandlerStatus {
+  string event_name = 1;
+  string layer_name = 2;
+  string status = 3;
+  string message = 4;
   ExtensionError error = 5;
 }

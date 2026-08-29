@@ -5728,6 +5728,15 @@ const completionSpec: Fig.Spec = {
 					],
 				},
 				{
+					name: ['--layer'],
+					description: 'Deploys services in the specified layer',
+					args: [
+						{
+							name: 'layer',
+						},
+					],
+				},
+				{
 					name: ['--timeout'],
 					description: 'Maximum time in seconds for azd to wait for each service deployment. This stops azd from waiting but does not cancel the Azure-side deployment. (default: 1200)',
 					args: [
@@ -6735,6 +6744,10 @@ const completionSpec: Fig.Spec = {
 			description: 'Provision and deploy your project to Azure with a single command.',
 			options: [
 				{
+					name: ['--include-dependencies'],
+					description: 'Include transitive dependencies of the selected project layer.',
+				},
+				{
 					name: ['--location', '-l'],
 					description: 'Azure location for the new environment',
 					args: [
@@ -6753,6 +6766,10 @@ const completionSpec: Fig.Spec = {
 					],
 				},
 			],
+			args: {
+				name: 'layer',
+				isOptional: true,
+			},
 		},
 		{
 			name: ['update'],

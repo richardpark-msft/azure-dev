@@ -37,6 +37,7 @@ type frameworkServiceRegistrar interface {
 type extensionEventManager interface {
 	serviceReceiver
 	AddProjectEventHandler(ctx context.Context, eventName string, handler ProjectEventHandler) error
+	AddLayerEventHandler(ctx context.Context, eventName string, handler LayerEventHandler) error
 	AddServiceEventHandler(
 		ctx context.Context, eventName string, handler ServiceEventHandler, options *ServiceEventOptions,
 	) error
@@ -75,6 +76,12 @@ type ServiceEventRegistration struct {
 	Options   *ServiceEventOptions
 }
 
+// LayerEventRegistration describes a layer-level event handler to register.
+type LayerEventRegistration struct {
+	EventName string
+	Handler   LayerEventHandler
+}
+
 // ProvisioningProviderRegistration describes a provisioning provider to register with azd core.
 type ProvisioningProviderRegistration struct {
 	Name    string
@@ -97,6 +104,7 @@ type ExtensionHost struct {
 	serviceTargets        []ServiceTargetRegistration
 	frameworkServices     []FrameworkServiceRegistration
 	projectHandlers       []ProjectEventRegistration
+	layerHandlers         []LayerEventRegistration
 	serviceHandlers       []ServiceEventRegistration
 	provisioningProviders []ProvisioningProviderRegistration
 	validationChecks      []ValidationCheckRegistration
@@ -173,6 +181,12 @@ func (er *ExtensionHost) WithFrameworkService(language string, factory Framework
 // WithProjectEventHandler registers a project-level event handler to be wired when Run is invoked.
 func (er *ExtensionHost) WithProjectEventHandler(eventName string, handler ProjectEventHandler) *ExtensionHost {
 	er.projectHandlers = append(er.projectHandlers, ProjectEventRegistration{EventName: eventName, Handler: handler})
+	return er
+}
+
+// WithLayerEventHandler registers a layer-level event handler to be wired when Run is invoked.
+func (er *ExtensionHost) WithLayerEventHandler(eventName string, handler LayerEventHandler) *ExtensionHost {
+	er.layerHandlers = append(er.layerHandlers, LayerEventRegistration{EventName: eventName, Handler: handler})
 	return er
 }
 
@@ -356,6 +370,20 @@ func (er *ExtensionHost) Run(ctx context.Context) error {
 		registrationsWaitGroup.Go(func() {
 			if err := er.eventManager.AddProjectEventHandler(ctx, r.EventName, r.Handler); err != nil {
 				registrationErrChan <- fmt.Errorf("failed to add project event handler '%s': %w", r.EventName, err)
+			}
+		})
+	}
+
+	// Register service event handlers in parallel
+	for _, reg := range er.layerHandlers {
+		if reg.Handler == nil {
+			return fmt.Errorf("layer event handler for '%s' is nil", reg.EventName)
+		}
+
+		r := reg
+		registrationsWaitGroup.Go(func() {
+			if err := er.eventManager.AddLayerEventHandler(ctx, r.EventName, r.Handler); err != nil {
+				registrationErrChan <- fmt.Errorf("failed to add layer event handler '%s': %w", r.EventName, err)
 			}
 		})
 	}

@@ -125,6 +125,13 @@ func (a *downAction) Run(ctx context.Context) (*actions.ActionResult, error) {
 
 	layers := infra.Options.GetLayers()
 	if downLayer != "" {
+		logicalLayer, err := a.importManager.GetLayer(ctx, a.projectConfig, downLayer)
+		if err != nil {
+			return nil, err
+		}
+		if logicalLayer.Infra == nil {
+			return nil, fmt.Errorf("layer %q has no infrastructure to delete: %w", downLayer, internal.ErrUnsupportedOperation)
+		}
 		layerOpt, err := infra.Options.GetLayer(downLayer)
 		if err != nil {
 			return nil, err

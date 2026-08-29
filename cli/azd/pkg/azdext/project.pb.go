@@ -25,6 +25,52 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type RemoveLayerMode int32
+
+const (
+	RemoveLayerMode_REMOVE_LAYER_MODE_REQUIRE_EMPTY    RemoveLayerMode = 0
+	RemoveLayerMode_REMOVE_LAYER_MODE_CASCADE_SERVICES RemoveLayerMode = 1
+)
+
+// Enum value maps for RemoveLayerMode.
+var (
+	RemoveLayerMode_name = map[int32]string{
+		0: "REMOVE_LAYER_MODE_REQUIRE_EMPTY",
+		1: "REMOVE_LAYER_MODE_CASCADE_SERVICES",
+	}
+	RemoveLayerMode_value = map[string]int32{
+		"REMOVE_LAYER_MODE_REQUIRE_EMPTY":    0,
+		"REMOVE_LAYER_MODE_CASCADE_SERVICES": 1,
+	}
+)
+
+func (x RemoveLayerMode) Enum() *RemoveLayerMode {
+	p := new(RemoveLayerMode)
+	*p = x
+	return p
+}
+
+func (x RemoveLayerMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RemoveLayerMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_project_proto_enumTypes[0].Descriptor()
+}
+
+func (RemoveLayerMode) Type() protoreflect.EnumType {
+	return &file_project_proto_enumTypes[0]
+}
+
+func (x RemoveLayerMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RemoveLayerMode.Descriptor instead.
+func (RemoveLayerMode) EnumDescriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{0}
+}
+
 // GetProjectResponse message definition
 type GetProjectResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -115,6 +161,544 @@ func (x *AddServiceRequest) GetService() *ServiceConfig {
 	return nil
 }
 
+// LayerDefinition is the persisted configuration accepted by layer mutations.
+type LayerDefinition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Infra         *InfraOptions          `protobuf:"bytes,2,opt,name=infra,proto3" json:"infra,omitempty"`
+	DependsOn     []string               `protobuf:"bytes,3,rep,name=depends_on,json=dependsOn,proto3" json:"depends_on,omitempty"`
+	Inputs        map[string]string      `protobuf:"bytes,4,rep,name=inputs,proto3" json:"inputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Outputs       map[string]string      `protobuf:"bytes,5,rep,name=outputs,proto3" json:"outputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LayerDefinition) Reset() {
+	*x = LayerDefinition{}
+	mi := &file_project_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LayerDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LayerDefinition) ProtoMessage() {}
+
+func (x *LayerDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LayerDefinition.ProtoReflect.Descriptor instead.
+func (*LayerDefinition) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *LayerDefinition) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *LayerDefinition) GetInfra() *InfraOptions {
+	if x != nil {
+		return x.Infra
+	}
+	return nil
+}
+
+func (x *LayerDefinition) GetDependsOn() []string {
+	if x != nil {
+		return x.DependsOn
+	}
+	return nil
+}
+
+func (x *LayerDefinition) GetInputs() map[string]string {
+	if x != nil {
+		return x.Inputs
+	}
+	return nil
+}
+
+func (x *LayerDefinition) GetOutputs() map[string]string {
+	if x != nil {
+		return x.Outputs
+	}
+	return nil
+}
+
+// Layer is the resolved view of an infrastructure-backed, service-only, or implicit layer.
+type Layer struct {
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	Name          string                    `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Infra         *InfraOptions             `protobuf:"bytes,2,opt,name=infra,proto3" json:"infra,omitempty"`
+	Services      map[string]*ServiceConfig `protobuf:"bytes,3,rep,name=services,proto3" json:"services,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	DependsOn     []string                  `protobuf:"bytes,4,rep,name=depends_on,json=dependsOn,proto3" json:"depends_on,omitempty"`
+	Inputs        map[string]string         `protobuf:"bytes,5,rep,name=inputs,proto3" json:"inputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Outputs       map[string]string         `protobuf:"bytes,6,rep,name=outputs,proto3" json:"outputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Implicit      bool                      `protobuf:"varint,7,opt,name=implicit,proto3" json:"implicit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Layer) Reset() {
+	*x = Layer{}
+	mi := &file_project_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Layer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Layer) ProtoMessage() {}
+
+func (x *Layer) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Layer.ProtoReflect.Descriptor instead.
+func (*Layer) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Layer) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Layer) GetInfra() *InfraOptions {
+	if x != nil {
+		return x.Infra
+	}
+	return nil
+}
+
+func (x *Layer) GetServices() map[string]*ServiceConfig {
+	if x != nil {
+		return x.Services
+	}
+	return nil
+}
+
+func (x *Layer) GetDependsOn() []string {
+	if x != nil {
+		return x.DependsOn
+	}
+	return nil
+}
+
+func (x *Layer) GetInputs() map[string]string {
+	if x != nil {
+		return x.Inputs
+	}
+	return nil
+}
+
+func (x *Layer) GetOutputs() map[string]string {
+	if x != nil {
+		return x.Outputs
+	}
+	return nil
+}
+
+func (x *Layer) GetImplicit() bool {
+	if x != nil {
+		return x.Implicit
+	}
+	return false
+}
+
+type AddLayerRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Layer         *LayerDefinition       `protobuf:"bytes,1,opt,name=layer,proto3" json:"layer,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddLayerRequest) Reset() {
+	*x = AddLayerRequest{}
+	mi := &file_project_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddLayerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddLayerRequest) ProtoMessage() {}
+
+func (x *AddLayerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddLayerRequest.ProtoReflect.Descriptor instead.
+func (*AddLayerRequest) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *AddLayerRequest) GetLayer() *LayerDefinition {
+	if x != nil {
+		return x.Layer
+	}
+	return nil
+}
+
+type GetLayerRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetLayerRequest) Reset() {
+	*x = GetLayerRequest{}
+	mi := &file_project_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetLayerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetLayerRequest) ProtoMessage() {}
+
+func (x *GetLayerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetLayerRequest.ProtoReflect.Descriptor instead.
+func (*GetLayerRequest) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *GetLayerRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type LayerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Layer         *Layer                 `protobuf:"bytes,1,opt,name=layer,proto3" json:"layer,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LayerResponse) Reset() {
+	*x = LayerResponse{}
+	mi := &file_project_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LayerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LayerResponse) ProtoMessage() {}
+
+func (x *LayerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LayerResponse.ProtoReflect.Descriptor instead.
+func (*LayerResponse) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *LayerResponse) GetLayer() *Layer {
+	if x != nil {
+		return x.Layer
+	}
+	return nil
+}
+
+type ListLayersResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Layers        []*Layer               `protobuf:"bytes,1,rep,name=layers,proto3" json:"layers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListLayersResponse) Reset() {
+	*x = ListLayersResponse{}
+	mi := &file_project_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListLayersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListLayersResponse) ProtoMessage() {}
+
+func (x *ListLayersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListLayersResponse.ProtoReflect.Descriptor instead.
+func (*ListLayersResponse) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ListLayersResponse) GetLayers() []*Layer {
+	if x != nil {
+		return x.Layers
+	}
+	return nil
+}
+
+type RemoveLayerRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Mode          RemoveLayerMode        `protobuf:"varint,2,opt,name=mode,proto3,enum=azdext.RemoveLayerMode" json:"mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveLayerRequest) Reset() {
+	*x = RemoveLayerRequest{}
+	mi := &file_project_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveLayerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveLayerRequest) ProtoMessage() {}
+
+func (x *RemoveLayerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveLayerRequest.ProtoReflect.Descriptor instead.
+func (*RemoveLayerRequest) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RemoveLayerRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RemoveLayerRequest) GetMode() RemoveLayerMode {
+	if x != nil {
+		return x.Mode
+	}
+	return RemoveLayerMode_REMOVE_LAYER_MODE_REQUIRE_EMPTY
+}
+
+type RemoveLayerResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RemovedServices []string               `protobuf:"bytes,1,rep,name=removed_services,json=removedServices,proto3" json:"removed_services,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RemoveLayerResponse) Reset() {
+	*x = RemoveLayerResponse{}
+	mi := &file_project_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveLayerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveLayerResponse) ProtoMessage() {}
+
+func (x *RemoveLayerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveLayerResponse.ProtoReflect.Descriptor instead.
+func (*RemoveLayerResponse) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *RemoveLayerResponse) GetRemovedServices() []string {
+	if x != nil {
+		return x.RemovedServices
+	}
+	return nil
+}
+
+type GetServiceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ServiceName   string                 `protobuf:"bytes,1,opt,name=service_name,json=serviceName,proto3" json:"service_name,omitempty"`
+	Layer         *string                `protobuf:"bytes,2,opt,name=layer,proto3,oneof" json:"layer,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetServiceRequest) Reset() {
+	*x = GetServiceRequest{}
+	mi := &file_project_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetServiceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetServiceRequest) ProtoMessage() {}
+
+func (x *GetServiceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetServiceRequest.ProtoReflect.Descriptor instead.
+func (*GetServiceRequest) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetServiceRequest) GetServiceName() string {
+	if x != nil {
+		return x.ServiceName
+	}
+	return ""
+}
+
+func (x *GetServiceRequest) GetLayer() string {
+	if x != nil && x.Layer != nil {
+		return *x.Layer
+	}
+	return ""
+}
+
+type GetServiceResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Service       *ServiceConfig         `protobuf:"bytes,1,opt,name=service,proto3" json:"service,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetServiceResponse) Reset() {
+	*x = GetServiceResponse{}
+	mi := &file_project_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetServiceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetServiceResponse) ProtoMessage() {}
+
+func (x *GetServiceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_project_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetServiceResponse.ProtoReflect.Descriptor instead.
+func (*GetServiceResponse) Descriptor() ([]byte, []int) {
+	return file_project_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GetServiceResponse) GetService() *ServiceConfig {
+	if x != nil {
+		return x.Service
+	}
+	return nil
+}
+
 // GetResolvedServicesResponse message definition
 type GetResolvedServicesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -126,7 +710,7 @@ type GetResolvedServicesResponse struct {
 
 func (x *GetResolvedServicesResponse) Reset() {
 	*x = GetResolvedServicesResponse{}
-	mi := &file_project_proto_msgTypes[2]
+	mi := &file_project_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -138,7 +722,7 @@ func (x *GetResolvedServicesResponse) String() string {
 func (*GetResolvedServicesResponse) ProtoMessage() {}
 
 func (x *GetResolvedServicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[2]
+	mi := &file_project_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -151,7 +735,7 @@ func (x *GetResolvedServicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResolvedServicesResponse.ProtoReflect.Descriptor instead.
 func (*GetResolvedServicesResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{2}
+	return file_project_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetResolvedServicesResponse) GetServices() map[string]*ServiceConfig {
@@ -171,7 +755,7 @@ type ParseGitHubUrlRequest struct {
 
 func (x *ParseGitHubUrlRequest) Reset() {
 	*x = ParseGitHubUrlRequest{}
-	mi := &file_project_proto_msgTypes[3]
+	mi := &file_project_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -183,7 +767,7 @@ func (x *ParseGitHubUrlRequest) String() string {
 func (*ParseGitHubUrlRequest) ProtoMessage() {}
 
 func (x *ParseGitHubUrlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[3]
+	mi := &file_project_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -196,7 +780,7 @@ func (x *ParseGitHubUrlRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParseGitHubUrlRequest.ProtoReflect.Descriptor instead.
 func (*ParseGitHubUrlRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{3}
+	return file_project_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ParseGitHubUrlRequest) GetUrl() string {
@@ -216,7 +800,7 @@ type GetProjectConfigSectionRequest struct {
 
 func (x *GetProjectConfigSectionRequest) Reset() {
 	*x = GetProjectConfigSectionRequest{}
-	mi := &file_project_proto_msgTypes[4]
+	mi := &file_project_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -228,7 +812,7 @@ func (x *GetProjectConfigSectionRequest) String() string {
 func (*GetProjectConfigSectionRequest) ProtoMessage() {}
 
 func (x *GetProjectConfigSectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[4]
+	mi := &file_project_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -241,7 +825,7 @@ func (x *GetProjectConfigSectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetProjectConfigSectionRequest.ProtoReflect.Descriptor instead.
 func (*GetProjectConfigSectionRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{4}
+	return file_project_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetProjectConfigSectionRequest) GetPath() string {
@@ -262,7 +846,7 @@ type GetProjectConfigSectionResponse struct {
 
 func (x *GetProjectConfigSectionResponse) Reset() {
 	*x = GetProjectConfigSectionResponse{}
-	mi := &file_project_proto_msgTypes[5]
+	mi := &file_project_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -274,7 +858,7 @@ func (x *GetProjectConfigSectionResponse) String() string {
 func (*GetProjectConfigSectionResponse) ProtoMessage() {}
 
 func (x *GetProjectConfigSectionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[5]
+	mi := &file_project_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -287,7 +871,7 @@ func (x *GetProjectConfigSectionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetProjectConfigSectionResponse.ProtoReflect.Descriptor instead.
 func (*GetProjectConfigSectionResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{5}
+	return file_project_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetProjectConfigSectionResponse) GetSection() *structpb.Struct {
@@ -317,7 +901,7 @@ type ParseGitHubUrlResponse struct {
 
 func (x *ParseGitHubUrlResponse) Reset() {
 	*x = ParseGitHubUrlResponse{}
-	mi := &file_project_proto_msgTypes[6]
+	mi := &file_project_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -329,7 +913,7 @@ func (x *ParseGitHubUrlResponse) String() string {
 func (*ParseGitHubUrlResponse) ProtoMessage() {}
 
 func (x *ParseGitHubUrlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[6]
+	mi := &file_project_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -342,7 +926,7 @@ func (x *ParseGitHubUrlResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParseGitHubUrlResponse.ProtoReflect.Descriptor instead.
 func (*ParseGitHubUrlResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{6}
+	return file_project_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ParseGitHubUrlResponse) GetHostname() string {
@@ -383,7 +967,7 @@ type GetProjectConfigValueRequest struct {
 
 func (x *GetProjectConfigValueRequest) Reset() {
 	*x = GetProjectConfigValueRequest{}
-	mi := &file_project_proto_msgTypes[7]
+	mi := &file_project_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -395,7 +979,7 @@ func (x *GetProjectConfigValueRequest) String() string {
 func (*GetProjectConfigValueRequest) ProtoMessage() {}
 
 func (x *GetProjectConfigValueRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[7]
+	mi := &file_project_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -408,7 +992,7 @@ func (x *GetProjectConfigValueRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetProjectConfigValueRequest.ProtoReflect.Descriptor instead.
 func (*GetProjectConfigValueRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{7}
+	return file_project_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GetProjectConfigValueRequest) GetPath() string {
@@ -429,7 +1013,7 @@ type GetProjectConfigValueResponse struct {
 
 func (x *GetProjectConfigValueResponse) Reset() {
 	*x = GetProjectConfigValueResponse{}
-	mi := &file_project_proto_msgTypes[8]
+	mi := &file_project_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -441,7 +1025,7 @@ func (x *GetProjectConfigValueResponse) String() string {
 func (*GetProjectConfigValueResponse) ProtoMessage() {}
 
 func (x *GetProjectConfigValueResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[8]
+	mi := &file_project_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -454,7 +1038,7 @@ func (x *GetProjectConfigValueResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetProjectConfigValueResponse.ProtoReflect.Descriptor instead.
 func (*GetProjectConfigValueResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{8}
+	return file_project_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GetProjectConfigValueResponse) GetValue() *structpb.Value {
@@ -482,7 +1066,7 @@ type SetProjectConfigSectionRequest struct {
 
 func (x *SetProjectConfigSectionRequest) Reset() {
 	*x = SetProjectConfigSectionRequest{}
-	mi := &file_project_proto_msgTypes[9]
+	mi := &file_project_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -494,7 +1078,7 @@ func (x *SetProjectConfigSectionRequest) String() string {
 func (*SetProjectConfigSectionRequest) ProtoMessage() {}
 
 func (x *SetProjectConfigSectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[9]
+	mi := &file_project_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -507,7 +1091,7 @@ func (x *SetProjectConfigSectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetProjectConfigSectionRequest.ProtoReflect.Descriptor instead.
 func (*SetProjectConfigSectionRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{9}
+	return file_project_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SetProjectConfigSectionRequest) GetPath() string {
@@ -535,7 +1119,7 @@ type SetProjectConfigValueRequest struct {
 
 func (x *SetProjectConfigValueRequest) Reset() {
 	*x = SetProjectConfigValueRequest{}
-	mi := &file_project_proto_msgTypes[10]
+	mi := &file_project_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -547,7 +1131,7 @@ func (x *SetProjectConfigValueRequest) String() string {
 func (*SetProjectConfigValueRequest) ProtoMessage() {}
 
 func (x *SetProjectConfigValueRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[10]
+	mi := &file_project_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -560,7 +1144,7 @@ func (x *SetProjectConfigValueRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetProjectConfigValueRequest.ProtoReflect.Descriptor instead.
 func (*SetProjectConfigValueRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{10}
+	return file_project_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SetProjectConfigValueRequest) GetPath() string {
@@ -587,7 +1171,7 @@ type UnsetProjectConfigRequest struct {
 
 func (x *UnsetProjectConfigRequest) Reset() {
 	*x = UnsetProjectConfigRequest{}
-	mi := &file_project_proto_msgTypes[11]
+	mi := &file_project_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -599,7 +1183,7 @@ func (x *UnsetProjectConfigRequest) String() string {
 func (*UnsetProjectConfigRequest) ProtoMessage() {}
 
 func (x *UnsetProjectConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[11]
+	mi := &file_project_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -612,7 +1196,7 @@ func (x *UnsetProjectConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsetProjectConfigRequest.ProtoReflect.Descriptor instead.
 func (*UnsetProjectConfigRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{11}
+	return file_project_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *UnsetProjectConfigRequest) GetPath() string {
@@ -633,7 +1217,7 @@ type GetServiceConfigSectionRequest struct {
 
 func (x *GetServiceConfigSectionRequest) Reset() {
 	*x = GetServiceConfigSectionRequest{}
-	mi := &file_project_proto_msgTypes[12]
+	mi := &file_project_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -645,7 +1229,7 @@ func (x *GetServiceConfigSectionRequest) String() string {
 func (*GetServiceConfigSectionRequest) ProtoMessage() {}
 
 func (x *GetServiceConfigSectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[12]
+	mi := &file_project_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -658,7 +1242,7 @@ func (x *GetServiceConfigSectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceConfigSectionRequest.ProtoReflect.Descriptor instead.
 func (*GetServiceConfigSectionRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{12}
+	return file_project_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *GetServiceConfigSectionRequest) GetServiceName() string {
@@ -686,7 +1270,7 @@ type GetServiceConfigSectionResponse struct {
 
 func (x *GetServiceConfigSectionResponse) Reset() {
 	*x = GetServiceConfigSectionResponse{}
-	mi := &file_project_proto_msgTypes[13]
+	mi := &file_project_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -698,7 +1282,7 @@ func (x *GetServiceConfigSectionResponse) String() string {
 func (*GetServiceConfigSectionResponse) ProtoMessage() {}
 
 func (x *GetServiceConfigSectionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[13]
+	mi := &file_project_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -711,7 +1295,7 @@ func (x *GetServiceConfigSectionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceConfigSectionResponse.ProtoReflect.Descriptor instead.
 func (*GetServiceConfigSectionResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{13}
+	return file_project_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GetServiceConfigSectionResponse) GetSection() *structpb.Struct {
@@ -739,7 +1323,7 @@ type GetServiceConfigValueRequest struct {
 
 func (x *GetServiceConfigValueRequest) Reset() {
 	*x = GetServiceConfigValueRequest{}
-	mi := &file_project_proto_msgTypes[14]
+	mi := &file_project_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -751,7 +1335,7 @@ func (x *GetServiceConfigValueRequest) String() string {
 func (*GetServiceConfigValueRequest) ProtoMessage() {}
 
 func (x *GetServiceConfigValueRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[14]
+	mi := &file_project_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -764,7 +1348,7 @@ func (x *GetServiceConfigValueRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceConfigValueRequest.ProtoReflect.Descriptor instead.
 func (*GetServiceConfigValueRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{14}
+	return file_project_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *GetServiceConfigValueRequest) GetServiceName() string {
@@ -792,7 +1376,7 @@ type GetServiceConfigValueResponse struct {
 
 func (x *GetServiceConfigValueResponse) Reset() {
 	*x = GetServiceConfigValueResponse{}
-	mi := &file_project_proto_msgTypes[15]
+	mi := &file_project_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -804,7 +1388,7 @@ func (x *GetServiceConfigValueResponse) String() string {
 func (*GetServiceConfigValueResponse) ProtoMessage() {}
 
 func (x *GetServiceConfigValueResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[15]
+	mi := &file_project_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -817,7 +1401,7 @@ func (x *GetServiceConfigValueResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceConfigValueResponse.ProtoReflect.Descriptor instead.
 func (*GetServiceConfigValueResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{15}
+	return file_project_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *GetServiceConfigValueResponse) GetValue() *structpb.Value {
@@ -846,7 +1430,7 @@ type SetServiceConfigSectionRequest struct {
 
 func (x *SetServiceConfigSectionRequest) Reset() {
 	*x = SetServiceConfigSectionRequest{}
-	mi := &file_project_proto_msgTypes[16]
+	mi := &file_project_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -858,7 +1442,7 @@ func (x *SetServiceConfigSectionRequest) String() string {
 func (*SetServiceConfigSectionRequest) ProtoMessage() {}
 
 func (x *SetServiceConfigSectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[16]
+	mi := &file_project_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -871,7 +1455,7 @@ func (x *SetServiceConfigSectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetServiceConfigSectionRequest.ProtoReflect.Descriptor instead.
 func (*SetServiceConfigSectionRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{16}
+	return file_project_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SetServiceConfigSectionRequest) GetServiceName() string {
@@ -907,7 +1491,7 @@ type SetServiceConfigValueRequest struct {
 
 func (x *SetServiceConfigValueRequest) Reset() {
 	*x = SetServiceConfigValueRequest{}
-	mi := &file_project_proto_msgTypes[17]
+	mi := &file_project_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -919,7 +1503,7 @@ func (x *SetServiceConfigValueRequest) String() string {
 func (*SetServiceConfigValueRequest) ProtoMessage() {}
 
 func (x *SetServiceConfigValueRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[17]
+	mi := &file_project_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -932,7 +1516,7 @@ func (x *SetServiceConfigValueRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetServiceConfigValueRequest.ProtoReflect.Descriptor instead.
 func (*SetServiceConfigValueRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{17}
+	return file_project_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SetServiceConfigValueRequest) GetServiceName() string {
@@ -967,7 +1551,7 @@ type UnsetServiceConfigRequest struct {
 
 func (x *UnsetServiceConfigRequest) Reset() {
 	*x = UnsetServiceConfigRequest{}
-	mi := &file_project_proto_msgTypes[18]
+	mi := &file_project_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -979,7 +1563,7 @@ func (x *UnsetServiceConfigRequest) String() string {
 func (*UnsetServiceConfigRequest) ProtoMessage() {}
 
 func (x *UnsetServiceConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[18]
+	mi := &file_project_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -992,7 +1576,7 @@ func (x *UnsetServiceConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsetServiceConfigRequest.ProtoReflect.Descriptor instead.
 func (*UnsetServiceConfigRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{18}
+	return file_project_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *UnsetServiceConfigRequest) GetServiceName() string {
@@ -1020,7 +1604,7 @@ type GetServiceTargetResourceRequest struct {
 
 func (x *GetServiceTargetResourceRequest) Reset() {
 	*x = GetServiceTargetResourceRequest{}
-	mi := &file_project_proto_msgTypes[19]
+	mi := &file_project_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1032,7 +1616,7 @@ func (x *GetServiceTargetResourceRequest) String() string {
 func (*GetServiceTargetResourceRequest) ProtoMessage() {}
 
 func (x *GetServiceTargetResourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[19]
+	mi := &file_project_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1045,7 +1629,7 @@ func (x *GetServiceTargetResourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceTargetResourceRequest.ProtoReflect.Descriptor instead.
 func (*GetServiceTargetResourceRequest) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{19}
+	return file_project_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *GetServiceTargetResourceRequest) GetServiceName() string {
@@ -1066,7 +1650,7 @@ type GetServiceTargetResourceResponse struct {
 
 func (x *GetServiceTargetResourceResponse) Reset() {
 	*x = GetServiceTargetResourceResponse{}
-	mi := &file_project_proto_msgTypes[20]
+	mi := &file_project_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1078,7 +1662,7 @@ func (x *GetServiceTargetResourceResponse) String() string {
 func (*GetServiceTargetResourceResponse) ProtoMessage() {}
 
 func (x *GetServiceTargetResourceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_project_proto_msgTypes[20]
+	mi := &file_project_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1091,7 +1675,7 @@ func (x *GetServiceTargetResourceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServiceTargetResourceResponse.ProtoReflect.Descriptor instead.
 func (*GetServiceTargetResourceResponse) Descriptor() ([]byte, []int) {
-	return file_project_proto_rawDescGZIP(), []int{20}
+	return file_project_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *GetServiceTargetResourceResponse) GetTargetResource() *TargetResource {
@@ -1109,6 +1693,56 @@ const file_project_proto_rawDesc = "" +
 	"\x12GetProjectResponse\x12/\n" +
 	"\aproject\x18\x01 \x01(\v2\x15.azdext.ProjectConfigR\aproject\"D\n" +
 	"\x11AddServiceRequest\x12/\n" +
+	"\aservice\x18\x01 \x01(\v2\x15.azdext.ServiceConfigR\aservice\"\xe4\x02\n" +
+	"\x0fLayerDefinition\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12*\n" +
+	"\x05infra\x18\x02 \x01(\v2\x14.azdext.InfraOptionsR\x05infra\x12\x1d\n" +
+	"\n" +
+	"depends_on\x18\x03 \x03(\tR\tdependsOn\x12;\n" +
+	"\x06inputs\x18\x04 \x03(\v2#.azdext.LayerDefinition.InputsEntryR\x06inputs\x12>\n" +
+	"\aoutputs\x18\x05 \x03(\v2$.azdext.LayerDefinition.OutputsEntryR\aoutputs\x1a9\n" +
+	"\vInputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a:\n" +
+	"\fOutputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xef\x03\n" +
+	"\x05Layer\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12*\n" +
+	"\x05infra\x18\x02 \x01(\v2\x14.azdext.InfraOptionsR\x05infra\x127\n" +
+	"\bservices\x18\x03 \x03(\v2\x1b.azdext.Layer.ServicesEntryR\bservices\x12\x1d\n" +
+	"\n" +
+	"depends_on\x18\x04 \x03(\tR\tdependsOn\x121\n" +
+	"\x06inputs\x18\x05 \x03(\v2\x19.azdext.Layer.InputsEntryR\x06inputs\x124\n" +
+	"\aoutputs\x18\x06 \x03(\v2\x1a.azdext.Layer.OutputsEntryR\aoutputs\x12\x1a\n" +
+	"\bimplicit\x18\a \x01(\bR\bimplicit\x1aR\n" +
+	"\rServicesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
+	"\x05value\x18\x02 \x01(\v2\x15.azdext.ServiceConfigR\x05value:\x028\x01\x1a9\n" +
+	"\vInputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a:\n" +
+	"\fOutputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
+	"\x0fAddLayerRequest\x12-\n" +
+	"\x05layer\x18\x01 \x01(\v2\x17.azdext.LayerDefinitionR\x05layer\"%\n" +
+	"\x0fGetLayerRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"4\n" +
+	"\rLayerResponse\x12#\n" +
+	"\x05layer\x18\x01 \x01(\v2\r.azdext.LayerR\x05layer\";\n" +
+	"\x12ListLayersResponse\x12%\n" +
+	"\x06layers\x18\x01 \x03(\v2\r.azdext.LayerR\x06layers\"U\n" +
+	"\x12RemoveLayerRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12+\n" +
+	"\x04mode\x18\x02 \x01(\x0e2\x17.azdext.RemoveLayerModeR\x04mode\"@\n" +
+	"\x13RemoveLayerResponse\x12)\n" +
+	"\x10removed_services\x18\x01 \x03(\tR\x0fremovedServices\"[\n" +
+	"\x11GetServiceRequest\x12!\n" +
+	"\fservice_name\x18\x01 \x01(\tR\vserviceName\x12\x19\n" +
+	"\x05layer\x18\x02 \x01(\tH\x00R\x05layer\x88\x01\x01B\b\n" +
+	"\x06_layer\"E\n" +
+	"\x12GetServiceResponse\x12/\n" +
 	"\aservice\x18\x01 \x01(\v2\x15.azdext.ServiceConfigR\aservice\"\xc0\x01\n" +
 	"\x1bGetResolvedServicesResponse\x12M\n" +
 	"\bservices\x18\x01 \x03(\v21.azdext.GetResolvedServicesResponse.ServicesEntryR\bservices\x1aR\n" +
@@ -1166,13 +1800,22 @@ const file_project_proto_rawDesc = "" +
 	"\x1fGetServiceTargetResourceRequest\x12!\n" +
 	"\fservice_name\x18\x01 \x01(\tR\vserviceName\"c\n" +
 	" GetServiceTargetResourceResponse\x12?\n" +
-	"\x0ftarget_resource\x18\x01 \x01(\v2\x16.azdext.TargetResourceR\x0etargetResource2\x9c\n" +
-	"\n" +
+	"\x0ftarget_resource\x18\x01 \x01(\v2\x16.azdext.TargetResourceR\x0etargetResource*^\n" +
+	"\x0fRemoveLayerMode\x12#\n" +
+	"\x1fREMOVE_LAYER_MODE_REQUIRE_EMPTY\x10\x00\x12&\n" +
+	"\"REMOVE_LAYER_MODE_CASCADE_SERVICES\x10\x012\xe1\f\n" +
 	"\x0eProjectService\x127\n" +
 	"\x03Get\x12\x14.azdext.EmptyRequest\x1a\x1a.azdext.GetProjectResponse\x12m\n" +
 	"\x18GetServiceTargetResource\x12'.azdext.GetServiceTargetResourceRequest\x1a(.azdext.GetServiceTargetResourceResponse\x12>\n" +
 	"\n" +
-	"AddService\x12\x19.azdext.AddServiceRequest\x1a\x15.azdext.EmptyResponse\x12P\n" +
+	"AddService\x12\x19.azdext.AddServiceRequest\x1a\x15.azdext.EmptyResponse\x12:\n" +
+	"\bAddLayer\x12\x17.azdext.AddLayerRequest\x1a\x15.azdext.LayerResponse\x12:\n" +
+	"\bGetLayer\x12\x17.azdext.GetLayerRequest\x1a\x15.azdext.LayerResponse\x12>\n" +
+	"\n" +
+	"ListLayers\x12\x14.azdext.EmptyRequest\x1a\x1a.azdext.ListLayersResponse\x12F\n" +
+	"\vRemoveLayer\x12\x1a.azdext.RemoveLayerRequest\x1a\x1b.azdext.RemoveLayerResponse\x12C\n" +
+	"\n" +
+	"GetService\x12\x19.azdext.GetServiceRequest\x1a\x1a.azdext.GetServiceResponse\x12P\n" +
 	"\x13GetResolvedServices\x12\x14.azdext.EmptyRequest\x1a#.azdext.GetResolvedServicesResponse\x12O\n" +
 	"\x0eParseGitHubUrl\x12\x1d.azdext.ParseGitHubUrlRequest\x1a\x1e.azdext.ParseGitHubUrlResponse\x12c\n" +
 	"\x10GetConfigSection\x12&.azdext.GetProjectConfigSectionRequest\x1a'.azdext.GetProjectConfigSectionResponse\x12]\n" +
@@ -1198,87 +1841,128 @@ func file_project_proto_rawDescGZIP() []byte {
 	return file_project_proto_rawDescData
 }
 
-var file_project_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_project_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_project_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_project_proto_goTypes = []any{
-	(*GetProjectResponse)(nil),               // 0: azdext.GetProjectResponse
-	(*AddServiceRequest)(nil),                // 1: azdext.AddServiceRequest
-	(*GetResolvedServicesResponse)(nil),      // 2: azdext.GetResolvedServicesResponse
-	(*ParseGitHubUrlRequest)(nil),            // 3: azdext.ParseGitHubUrlRequest
-	(*GetProjectConfigSectionRequest)(nil),   // 4: azdext.GetProjectConfigSectionRequest
-	(*GetProjectConfigSectionResponse)(nil),  // 5: azdext.GetProjectConfigSectionResponse
-	(*ParseGitHubUrlResponse)(nil),           // 6: azdext.ParseGitHubUrlResponse
-	(*GetProjectConfigValueRequest)(nil),     // 7: azdext.GetProjectConfigValueRequest
-	(*GetProjectConfigValueResponse)(nil),    // 8: azdext.GetProjectConfigValueResponse
-	(*SetProjectConfigSectionRequest)(nil),   // 9: azdext.SetProjectConfigSectionRequest
-	(*SetProjectConfigValueRequest)(nil),     // 10: azdext.SetProjectConfigValueRequest
-	(*UnsetProjectConfigRequest)(nil),        // 11: azdext.UnsetProjectConfigRequest
-	(*GetServiceConfigSectionRequest)(nil),   // 12: azdext.GetServiceConfigSectionRequest
-	(*GetServiceConfigSectionResponse)(nil),  // 13: azdext.GetServiceConfigSectionResponse
-	(*GetServiceConfigValueRequest)(nil),     // 14: azdext.GetServiceConfigValueRequest
-	(*GetServiceConfigValueResponse)(nil),    // 15: azdext.GetServiceConfigValueResponse
-	(*SetServiceConfigSectionRequest)(nil),   // 16: azdext.SetServiceConfigSectionRequest
-	(*SetServiceConfigValueRequest)(nil),     // 17: azdext.SetServiceConfigValueRequest
-	(*UnsetServiceConfigRequest)(nil),        // 18: azdext.UnsetServiceConfigRequest
-	(*GetServiceTargetResourceRequest)(nil),  // 19: azdext.GetServiceTargetResourceRequest
-	(*GetServiceTargetResourceResponse)(nil), // 20: azdext.GetServiceTargetResourceResponse
-	nil,                                      // 21: azdext.GetResolvedServicesResponse.ServicesEntry
-	(*ProjectConfig)(nil),                    // 22: azdext.ProjectConfig
-	(*ServiceConfig)(nil),                    // 23: azdext.ServiceConfig
-	(*structpb.Struct)(nil),                  // 24: google.protobuf.Struct
-	(*structpb.Value)(nil),                   // 25: google.protobuf.Value
-	(*TargetResource)(nil),                   // 26: azdext.TargetResource
-	(*EmptyRequest)(nil),                     // 27: azdext.EmptyRequest
-	(*EmptyResponse)(nil),                    // 28: azdext.EmptyResponse
+	(RemoveLayerMode)(0),                     // 0: azdext.RemoveLayerMode
+	(*GetProjectResponse)(nil),               // 1: azdext.GetProjectResponse
+	(*AddServiceRequest)(nil),                // 2: azdext.AddServiceRequest
+	(*LayerDefinition)(nil),                  // 3: azdext.LayerDefinition
+	(*Layer)(nil),                            // 4: azdext.Layer
+	(*AddLayerRequest)(nil),                  // 5: azdext.AddLayerRequest
+	(*GetLayerRequest)(nil),                  // 6: azdext.GetLayerRequest
+	(*LayerResponse)(nil),                    // 7: azdext.LayerResponse
+	(*ListLayersResponse)(nil),               // 8: azdext.ListLayersResponse
+	(*RemoveLayerRequest)(nil),               // 9: azdext.RemoveLayerRequest
+	(*RemoveLayerResponse)(nil),              // 10: azdext.RemoveLayerResponse
+	(*GetServiceRequest)(nil),                // 11: azdext.GetServiceRequest
+	(*GetServiceResponse)(nil),               // 12: azdext.GetServiceResponse
+	(*GetResolvedServicesResponse)(nil),      // 13: azdext.GetResolvedServicesResponse
+	(*ParseGitHubUrlRequest)(nil),            // 14: azdext.ParseGitHubUrlRequest
+	(*GetProjectConfigSectionRequest)(nil),   // 15: azdext.GetProjectConfigSectionRequest
+	(*GetProjectConfigSectionResponse)(nil),  // 16: azdext.GetProjectConfigSectionResponse
+	(*ParseGitHubUrlResponse)(nil),           // 17: azdext.ParseGitHubUrlResponse
+	(*GetProjectConfigValueRequest)(nil),     // 18: azdext.GetProjectConfigValueRequest
+	(*GetProjectConfigValueResponse)(nil),    // 19: azdext.GetProjectConfigValueResponse
+	(*SetProjectConfigSectionRequest)(nil),   // 20: azdext.SetProjectConfigSectionRequest
+	(*SetProjectConfigValueRequest)(nil),     // 21: azdext.SetProjectConfigValueRequest
+	(*UnsetProjectConfigRequest)(nil),        // 22: azdext.UnsetProjectConfigRequest
+	(*GetServiceConfigSectionRequest)(nil),   // 23: azdext.GetServiceConfigSectionRequest
+	(*GetServiceConfigSectionResponse)(nil),  // 24: azdext.GetServiceConfigSectionResponse
+	(*GetServiceConfigValueRequest)(nil),     // 25: azdext.GetServiceConfigValueRequest
+	(*GetServiceConfigValueResponse)(nil),    // 26: azdext.GetServiceConfigValueResponse
+	(*SetServiceConfigSectionRequest)(nil),   // 27: azdext.SetServiceConfigSectionRequest
+	(*SetServiceConfigValueRequest)(nil),     // 28: azdext.SetServiceConfigValueRequest
+	(*UnsetServiceConfigRequest)(nil),        // 29: azdext.UnsetServiceConfigRequest
+	(*GetServiceTargetResourceRequest)(nil),  // 30: azdext.GetServiceTargetResourceRequest
+	(*GetServiceTargetResourceResponse)(nil), // 31: azdext.GetServiceTargetResourceResponse
+	nil,                                      // 32: azdext.LayerDefinition.InputsEntry
+	nil,                                      // 33: azdext.LayerDefinition.OutputsEntry
+	nil,                                      // 34: azdext.Layer.ServicesEntry
+	nil,                                      // 35: azdext.Layer.InputsEntry
+	nil,                                      // 36: azdext.Layer.OutputsEntry
+	nil,                                      // 37: azdext.GetResolvedServicesResponse.ServicesEntry
+	(*ProjectConfig)(nil),                    // 38: azdext.ProjectConfig
+	(*ServiceConfig)(nil),                    // 39: azdext.ServiceConfig
+	(*InfraOptions)(nil),                     // 40: azdext.InfraOptions
+	(*structpb.Struct)(nil),                  // 41: google.protobuf.Struct
+	(*structpb.Value)(nil),                   // 42: google.protobuf.Value
+	(*TargetResource)(nil),                   // 43: azdext.TargetResource
+	(*EmptyRequest)(nil),                     // 44: azdext.EmptyRequest
+	(*EmptyResponse)(nil),                    // 45: azdext.EmptyResponse
 }
 var file_project_proto_depIdxs = []int32{
-	22, // 0: azdext.GetProjectResponse.project:type_name -> azdext.ProjectConfig
-	23, // 1: azdext.AddServiceRequest.service:type_name -> azdext.ServiceConfig
-	21, // 2: azdext.GetResolvedServicesResponse.services:type_name -> azdext.GetResolvedServicesResponse.ServicesEntry
-	24, // 3: azdext.GetProjectConfigSectionResponse.section:type_name -> google.protobuf.Struct
-	25, // 4: azdext.GetProjectConfigValueResponse.value:type_name -> google.protobuf.Value
-	24, // 5: azdext.SetProjectConfigSectionRequest.section:type_name -> google.protobuf.Struct
-	25, // 6: azdext.SetProjectConfigValueRequest.value:type_name -> google.protobuf.Value
-	24, // 7: azdext.GetServiceConfigSectionResponse.section:type_name -> google.protobuf.Struct
-	25, // 8: azdext.GetServiceConfigValueResponse.value:type_name -> google.protobuf.Value
-	24, // 9: azdext.SetServiceConfigSectionRequest.section:type_name -> google.protobuf.Struct
-	25, // 10: azdext.SetServiceConfigValueRequest.value:type_name -> google.protobuf.Value
-	26, // 11: azdext.GetServiceTargetResourceResponse.target_resource:type_name -> azdext.TargetResource
-	23, // 12: azdext.GetResolvedServicesResponse.ServicesEntry.value:type_name -> azdext.ServiceConfig
-	27, // 13: azdext.ProjectService.Get:input_type -> azdext.EmptyRequest
-	19, // 14: azdext.ProjectService.GetServiceTargetResource:input_type -> azdext.GetServiceTargetResourceRequest
-	1,  // 15: azdext.ProjectService.AddService:input_type -> azdext.AddServiceRequest
-	27, // 16: azdext.ProjectService.GetResolvedServices:input_type -> azdext.EmptyRequest
-	3,  // 17: azdext.ProjectService.ParseGitHubUrl:input_type -> azdext.ParseGitHubUrlRequest
-	4,  // 18: azdext.ProjectService.GetConfigSection:input_type -> azdext.GetProjectConfigSectionRequest
-	7,  // 19: azdext.ProjectService.GetConfigValue:input_type -> azdext.GetProjectConfigValueRequest
-	9,  // 20: azdext.ProjectService.SetConfigSection:input_type -> azdext.SetProjectConfigSectionRequest
-	10, // 21: azdext.ProjectService.SetConfigValue:input_type -> azdext.SetProjectConfigValueRequest
-	11, // 22: azdext.ProjectService.UnsetConfig:input_type -> azdext.UnsetProjectConfigRequest
-	12, // 23: azdext.ProjectService.GetServiceConfigSection:input_type -> azdext.GetServiceConfigSectionRequest
-	14, // 24: azdext.ProjectService.GetServiceConfigValue:input_type -> azdext.GetServiceConfigValueRequest
-	16, // 25: azdext.ProjectService.SetServiceConfigSection:input_type -> azdext.SetServiceConfigSectionRequest
-	17, // 26: azdext.ProjectService.SetServiceConfigValue:input_type -> azdext.SetServiceConfigValueRequest
-	18, // 27: azdext.ProjectService.UnsetServiceConfig:input_type -> azdext.UnsetServiceConfigRequest
-	0,  // 28: azdext.ProjectService.Get:output_type -> azdext.GetProjectResponse
-	20, // 29: azdext.ProjectService.GetServiceTargetResource:output_type -> azdext.GetServiceTargetResourceResponse
-	28, // 30: azdext.ProjectService.AddService:output_type -> azdext.EmptyResponse
-	2,  // 31: azdext.ProjectService.GetResolvedServices:output_type -> azdext.GetResolvedServicesResponse
-	6,  // 32: azdext.ProjectService.ParseGitHubUrl:output_type -> azdext.ParseGitHubUrlResponse
-	5,  // 33: azdext.ProjectService.GetConfigSection:output_type -> azdext.GetProjectConfigSectionResponse
-	8,  // 34: azdext.ProjectService.GetConfigValue:output_type -> azdext.GetProjectConfigValueResponse
-	28, // 35: azdext.ProjectService.SetConfigSection:output_type -> azdext.EmptyResponse
-	28, // 36: azdext.ProjectService.SetConfigValue:output_type -> azdext.EmptyResponse
-	28, // 37: azdext.ProjectService.UnsetConfig:output_type -> azdext.EmptyResponse
-	13, // 38: azdext.ProjectService.GetServiceConfigSection:output_type -> azdext.GetServiceConfigSectionResponse
-	15, // 39: azdext.ProjectService.GetServiceConfigValue:output_type -> azdext.GetServiceConfigValueResponse
-	28, // 40: azdext.ProjectService.SetServiceConfigSection:output_type -> azdext.EmptyResponse
-	28, // 41: azdext.ProjectService.SetServiceConfigValue:output_type -> azdext.EmptyResponse
-	28, // 42: azdext.ProjectService.UnsetServiceConfig:output_type -> azdext.EmptyResponse
-	28, // [28:43] is the sub-list for method output_type
-	13, // [13:28] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	38, // 0: azdext.GetProjectResponse.project:type_name -> azdext.ProjectConfig
+	39, // 1: azdext.AddServiceRequest.service:type_name -> azdext.ServiceConfig
+	40, // 2: azdext.LayerDefinition.infra:type_name -> azdext.InfraOptions
+	32, // 3: azdext.LayerDefinition.inputs:type_name -> azdext.LayerDefinition.InputsEntry
+	33, // 4: azdext.LayerDefinition.outputs:type_name -> azdext.LayerDefinition.OutputsEntry
+	40, // 5: azdext.Layer.infra:type_name -> azdext.InfraOptions
+	34, // 6: azdext.Layer.services:type_name -> azdext.Layer.ServicesEntry
+	35, // 7: azdext.Layer.inputs:type_name -> azdext.Layer.InputsEntry
+	36, // 8: azdext.Layer.outputs:type_name -> azdext.Layer.OutputsEntry
+	3,  // 9: azdext.AddLayerRequest.layer:type_name -> azdext.LayerDefinition
+	4,  // 10: azdext.LayerResponse.layer:type_name -> azdext.Layer
+	4,  // 11: azdext.ListLayersResponse.layers:type_name -> azdext.Layer
+	0,  // 12: azdext.RemoveLayerRequest.mode:type_name -> azdext.RemoveLayerMode
+	39, // 13: azdext.GetServiceResponse.service:type_name -> azdext.ServiceConfig
+	37, // 14: azdext.GetResolvedServicesResponse.services:type_name -> azdext.GetResolvedServicesResponse.ServicesEntry
+	41, // 15: azdext.GetProjectConfigSectionResponse.section:type_name -> google.protobuf.Struct
+	42, // 16: azdext.GetProjectConfigValueResponse.value:type_name -> google.protobuf.Value
+	41, // 17: azdext.SetProjectConfigSectionRequest.section:type_name -> google.protobuf.Struct
+	42, // 18: azdext.SetProjectConfigValueRequest.value:type_name -> google.protobuf.Value
+	41, // 19: azdext.GetServiceConfigSectionResponse.section:type_name -> google.protobuf.Struct
+	42, // 20: azdext.GetServiceConfigValueResponse.value:type_name -> google.protobuf.Value
+	41, // 21: azdext.SetServiceConfigSectionRequest.section:type_name -> google.protobuf.Struct
+	42, // 22: azdext.SetServiceConfigValueRequest.value:type_name -> google.protobuf.Value
+	43, // 23: azdext.GetServiceTargetResourceResponse.target_resource:type_name -> azdext.TargetResource
+	39, // 24: azdext.Layer.ServicesEntry.value:type_name -> azdext.ServiceConfig
+	39, // 25: azdext.GetResolvedServicesResponse.ServicesEntry.value:type_name -> azdext.ServiceConfig
+	44, // 26: azdext.ProjectService.Get:input_type -> azdext.EmptyRequest
+	30, // 27: azdext.ProjectService.GetServiceTargetResource:input_type -> azdext.GetServiceTargetResourceRequest
+	2,  // 28: azdext.ProjectService.AddService:input_type -> azdext.AddServiceRequest
+	5,  // 29: azdext.ProjectService.AddLayer:input_type -> azdext.AddLayerRequest
+	6,  // 30: azdext.ProjectService.GetLayer:input_type -> azdext.GetLayerRequest
+	44, // 31: azdext.ProjectService.ListLayers:input_type -> azdext.EmptyRequest
+	9,  // 32: azdext.ProjectService.RemoveLayer:input_type -> azdext.RemoveLayerRequest
+	11, // 33: azdext.ProjectService.GetService:input_type -> azdext.GetServiceRequest
+	44, // 34: azdext.ProjectService.GetResolvedServices:input_type -> azdext.EmptyRequest
+	14, // 35: azdext.ProjectService.ParseGitHubUrl:input_type -> azdext.ParseGitHubUrlRequest
+	15, // 36: azdext.ProjectService.GetConfigSection:input_type -> azdext.GetProjectConfigSectionRequest
+	18, // 37: azdext.ProjectService.GetConfigValue:input_type -> azdext.GetProjectConfigValueRequest
+	20, // 38: azdext.ProjectService.SetConfigSection:input_type -> azdext.SetProjectConfigSectionRequest
+	21, // 39: azdext.ProjectService.SetConfigValue:input_type -> azdext.SetProjectConfigValueRequest
+	22, // 40: azdext.ProjectService.UnsetConfig:input_type -> azdext.UnsetProjectConfigRequest
+	23, // 41: azdext.ProjectService.GetServiceConfigSection:input_type -> azdext.GetServiceConfigSectionRequest
+	25, // 42: azdext.ProjectService.GetServiceConfigValue:input_type -> azdext.GetServiceConfigValueRequest
+	27, // 43: azdext.ProjectService.SetServiceConfigSection:input_type -> azdext.SetServiceConfigSectionRequest
+	28, // 44: azdext.ProjectService.SetServiceConfigValue:input_type -> azdext.SetServiceConfigValueRequest
+	29, // 45: azdext.ProjectService.UnsetServiceConfig:input_type -> azdext.UnsetServiceConfigRequest
+	1,  // 46: azdext.ProjectService.Get:output_type -> azdext.GetProjectResponse
+	31, // 47: azdext.ProjectService.GetServiceTargetResource:output_type -> azdext.GetServiceTargetResourceResponse
+	45, // 48: azdext.ProjectService.AddService:output_type -> azdext.EmptyResponse
+	7,  // 49: azdext.ProjectService.AddLayer:output_type -> azdext.LayerResponse
+	7,  // 50: azdext.ProjectService.GetLayer:output_type -> azdext.LayerResponse
+	8,  // 51: azdext.ProjectService.ListLayers:output_type -> azdext.ListLayersResponse
+	10, // 52: azdext.ProjectService.RemoveLayer:output_type -> azdext.RemoveLayerResponse
+	12, // 53: azdext.ProjectService.GetService:output_type -> azdext.GetServiceResponse
+	13, // 54: azdext.ProjectService.GetResolvedServices:output_type -> azdext.GetResolvedServicesResponse
+	17, // 55: azdext.ProjectService.ParseGitHubUrl:output_type -> azdext.ParseGitHubUrlResponse
+	16, // 56: azdext.ProjectService.GetConfigSection:output_type -> azdext.GetProjectConfigSectionResponse
+	19, // 57: azdext.ProjectService.GetConfigValue:output_type -> azdext.GetProjectConfigValueResponse
+	45, // 58: azdext.ProjectService.SetConfigSection:output_type -> azdext.EmptyResponse
+	45, // 59: azdext.ProjectService.SetConfigValue:output_type -> azdext.EmptyResponse
+	45, // 60: azdext.ProjectService.UnsetConfig:output_type -> azdext.EmptyResponse
+	24, // 61: azdext.ProjectService.GetServiceConfigSection:output_type -> azdext.GetServiceConfigSectionResponse
+	26, // 62: azdext.ProjectService.GetServiceConfigValue:output_type -> azdext.GetServiceConfigValueResponse
+	45, // 63: azdext.ProjectService.SetServiceConfigSection:output_type -> azdext.EmptyResponse
+	45, // 64: azdext.ProjectService.SetServiceConfigValue:output_type -> azdext.EmptyResponse
+	45, // 65: azdext.ProjectService.UnsetServiceConfig:output_type -> azdext.EmptyResponse
+	46, // [46:66] is the sub-list for method output_type
+	26, // [26:46] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_project_proto_init() }
@@ -1288,18 +1972,20 @@ func file_project_proto_init() {
 	}
 	file_models_proto_init()
 	file_service_target_proto_init()
+	file_project_proto_msgTypes[10].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_project_proto_rawDesc), len(file_project_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   22,
+			NumEnums:      1,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_project_proto_goTypes,
 		DependencyIndexes: file_project_proto_depIdxs,
+		EnumInfos:         file_project_proto_enumTypes,
 		MessageInfos:      file_project_proto_msgTypes,
 	}.Build()
 	File_project_proto = out.File

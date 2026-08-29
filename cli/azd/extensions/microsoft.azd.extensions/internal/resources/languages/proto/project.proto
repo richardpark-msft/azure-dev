@@ -14,6 +14,21 @@ service ProjectService {
 
   // AddService adds a new service to the project.
   rpc AddService(AddServiceRequest) returns (EmptyResponse);
+
+  // AddLayer adds or updates an infrastructure-backed project layer.
+  rpc AddLayer(AddLayerRequest) returns (LayerResponse);
+
+  // GetLayer gets a resolved project layer. An empty name addresses the implicit layer.
+  rpc GetLayer(GetLayerRequest) returns (LayerResponse);
+
+  // ListLayers lists all resolved project layers.
+  rpc ListLayers(EmptyRequest) returns (ListLayersResponse);
+
+  // RemoveLayer removes a project layer using the requested safety mode.
+  rpc RemoveLayer(RemoveLayerRequest) returns (RemoveLayerResponse);
+
+  // GetService gets a globally named service and optionally verifies its layer membership.
+  rpc GetService(GetServiceRequest) returns (GetServiceResponse);
 }
 
 // GetProjectResponse message definition
@@ -23,5 +38,62 @@ message GetProjectResponse {
 
 // AddServiceRequest message definition
 message AddServiceRequest {
+  ServiceConfig service = 1;
+}
+
+message LayerDefinition {
+  string name = 1;
+  InfraOptions infra = 2;
+  repeated string depends_on = 3;
+  map<string, string> inputs = 4;
+  map<string, string> outputs = 5;
+}
+
+message Layer {
+  string name = 1;
+  InfraOptions infra = 2;
+  map<string, ServiceConfig> services = 3;
+  repeated string depends_on = 4;
+  map<string, string> inputs = 5;
+  map<string, string> outputs = 6;
+  bool implicit = 7;
+}
+
+message AddLayerRequest {
+  LayerDefinition layer = 1;
+}
+
+message GetLayerRequest {
+  string name = 1;
+}
+
+message LayerResponse {
+  Layer layer = 1;
+}
+
+message ListLayersResponse {
+  repeated Layer layers = 1;
+}
+
+enum RemoveLayerMode {
+  REMOVE_LAYER_MODE_REQUIRE_EMPTY = 0;
+  REMOVE_LAYER_MODE_CASCADE_SERVICES = 1;
+}
+
+message RemoveLayerRequest {
+  string name = 1;
+  RemoveLayerMode mode = 2;
+}
+
+message RemoveLayerResponse {
+  repeated string removed_services = 1;
+}
+
+message GetServiceRequest {
+  string service_name = 1;
+  optional string layer = 2;
+}
+
+message GetServiceResponse {
   ServiceConfig service = 1;
 }

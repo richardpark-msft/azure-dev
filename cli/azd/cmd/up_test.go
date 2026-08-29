@@ -18,7 +18,7 @@ func Test_NewUpAction_Constructor(t *testing.T) {
 	t.Parallel()
 	flags := &upFlags{}
 	console := mockinput.NewMockConsole()
-	a := newUpAction(flags, console, nil, nil, nil, nil, nil, nil, nil, nil)
+	a := newUpAction(nil, flags, console, nil, nil, nil, nil, nil, nil, nil, nil)
 	ua := a.(*upAction)
 	require.Same(t, flags, ua.flags)
 }
@@ -27,7 +27,7 @@ func Test_NewUpCmd(t *testing.T) {
 	t.Parallel()
 	cmd := newUpCmd()
 	require.NotNil(t, cmd)
-	assert.Equal(t, "up", cmd.Use)
+	assert.Equal(t, "up [<layer>]", cmd.Use)
 }
 
 func Test_NewUpFlags(t *testing.T) {

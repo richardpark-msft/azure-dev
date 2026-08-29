@@ -27,12 +27,13 @@ workflows:
 Any azd command and flags are supported in the workflow steps.
 
 Usage
-  azd up [flags]
+  azd up [<layer>] [flags]
 
 Flags
-    -e, --environment string  	: The name of the environment to use.
-    -l, --location string     	: Azure location for the new environment
-        --subscription string 	: ID of an Azure subscription to use for the new environment
+    -e, --environment string   	: The name of the environment to use.
+        --include-dependencies 	: Include transitive dependencies of the selected project layer.
+    -l, --location string      	: Azure location for the new environment
+        --subscription string  	: ID of an Azure subscription to use for the new environment
 
 Global Flags
     -C, --cwd string 	: Sets the current working directory.

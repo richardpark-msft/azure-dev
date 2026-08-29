@@ -1,0 +1,18 @@
+services:
+  app:
+    project: .
+    host: appservice
+    language: js
+
+infra:
+  layers:
+    - name: storage
+      provider: bicep
+      path: ./infra/storage
+      outputs:
+        STORAGE_ACCOUNT_NAME: STG1_STORAGE_ACCOUNT_NAME
+    - name: storage2
+      provider: bicep
+      path: ./infra/storage
+      outputs:
+        STORAGE_ACCOUNT_NAME: STG2_STORAGE_ACCOUNT_NAME

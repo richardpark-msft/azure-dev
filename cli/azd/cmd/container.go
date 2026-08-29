@@ -730,6 +730,9 @@ func registerCommonDependencies(container *ioc.NestedContainer) {
 	container.MustRegisterSingleton(func(subManager *account.SubscriptionsManager) account.SubscriptionResolver {
 		return subManager
 	})
+	container.MustRegisterSingleton(func(subManager *account.SubscriptionsManager) cmd.EnvironmentDetailsProvider {
+		return subManager
+	})
 
 	// Tools
 	container.MustRegisterSingleton(azapi.NewAzureClient)
@@ -857,6 +860,9 @@ func registerCommonDependencies(container *ioc.NestedContainer) {
 
 	// Pipelines
 	container.MustRegisterScoped(pipeline.NewPipelineManager)
+	container.MustRegisterScoped(func(manager *pipeline.PipelineManager) pipelineConfigManager {
+		return manager
+	})
 	container.MustRegisterSingleton(func(flags *pipelineConfigFlags) *pipeline.PipelineManagerArgs {
 		return &flags.PipelineManagerArgs
 	})

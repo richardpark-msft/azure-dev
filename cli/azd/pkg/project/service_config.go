@@ -28,6 +28,10 @@ type ServiceConfig struct {
 	Project *ProjectConfig `yaml:"-"`
 	// The friendly name/key of the project from the azure.yaml file
 	Name string `yaml:"-"`
+	// Layer is the optional logical layer that owns this service.
+	Layer string `yaml:"layer,omitempty"`
+	// DependsOn lists logical project layers that must complete before this service deploys.
+	DependsOn []string `yaml:"dependsOn,omitempty"`
 	// The azure resource group to deploy the service to
 	ResourceGroupName osutil.ExpandableString `yaml:"resourceGroup,omitempty"`
 	// The name used to override the default azure resource name

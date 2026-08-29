@@ -399,6 +399,68 @@ func TestAnalyzeLayerDependencies_DuplicateOutputs(t *testing.T) {
 	require.Contains(t, err.Error(), "SHARED_VAR")
 }
 
+func TestAnalyzeLayerDependencies_RemappedDuplicateOutputs(t *testing.T) {
+	dir := t.TempDir()
+	layerDir := filepath.Join(dir, "storage")
+	mkTestDir(t, layerDir)
+	writeTestFile(t, filepath.Join(layerDir, "main.bicep"),
+		"output STORAGE_ACCOUNT_NAME string = 'storage'\n")
+
+	layers := []provisioning.Options{
+		{
+			Name:    "storage",
+			Path:    "storage",
+			Module:  "main",
+			Outputs: map[string]string{"STORAGE_ACCOUNT_NAME": "STG1_STORAGE_ACCOUNT_NAME"},
+		},
+		{
+			Name:    "storage2",
+			Path:    "storage",
+			Module:  "main",
+			Outputs: map[string]string{"STORAGE_ACCOUNT_NAME": "STG2_STORAGE_ACCOUNT_NAME"},
+		},
+	}
+
+	result, err := AnalyzeLayerDependencies(t.Context(), layers, dir)
+
+	require.NoError(t, err)
+	require.Equal(t, [][]int{{0, 1}}, result.Levels)
+}
+
+func TestAnalyzeLayerDependencies_MappedInputUsesEffectiveOutput(t *testing.T) {
+	dir := t.TempDir()
+	producerDir := filepath.Join(dir, "producer")
+	mkTestDir(t, producerDir)
+	writeTestFile(t, filepath.Join(producerDir, "main.bicep"),
+		"output RAW_PROJECT_ID string = 'project'\n")
+
+	consumerDir := filepath.Join(dir, "consumer")
+	mkTestDir(t, consumerDir)
+	writeTestFile(t, filepath.Join(consumerDir, "main.bicep"), "param projectId string\n")
+	writeTestFile(t, filepath.Join(consumerDir, "main.bicepparam"),
+		"using './main.bicep'\nparam projectId = readEnvironmentVariable('LOCAL_PROJECT_ID')\n")
+
+	layers := []provisioning.Options{
+		{
+			Name:    "producer",
+			Path:    "producer",
+			Module:  "main",
+			Outputs: map[string]string{"RAW_PROJECT_ID": "SHARED_PROJECT_ID"},
+		},
+		{
+			Name:   "consumer",
+			Path:   "consumer",
+			Module: "main",
+			Inputs: map[string]string{"LOCAL_PROJECT_ID": "SHARED_PROJECT_ID"},
+		},
+	}
+
+	result, err := AnalyzeLayerDependencies(t.Context(), layers, dir)
+
+	require.NoError(t, err)
+	require.Equal(t, map[int][]int{1: {0}}, result.Edges)
+}
+
 func TestAnalyzeLayerDependencies_SameLayerDuplicateOutputIsAllowed(t *testing.T) {
 	// A single layer producing an output name once is fine; the
 	// duplicate check only triggers across different layers. This test

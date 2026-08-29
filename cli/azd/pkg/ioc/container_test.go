@@ -171,8 +171,9 @@ func Test_Container_Singleton_Instance_Register_Resolve(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, scope2Instance1)
 
-		// Instance 1 & 2 are singletons but overriden in each child scope so they should be different
-		require.NotSame(t, rootInstance, rootInstanceResolved)
+		// Child overrides must not replace the singleton registered in the root scope.
+		require.Same(t, rootInstance, rootInstanceResolved)
+		// Each child scope resolves its own override.
 		require.NotSame(t, scope1Instance, scope2Instance)
 	})
 }

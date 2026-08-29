@@ -35,6 +35,7 @@ type DefaultProviderResolver func() (ProviderKind, error)
 // Manages the orchestration of infrastructure provisioning
 type Manager struct {
 	serviceLocator      ioc.ServiceLocator
+	providerLocator     ioc.ServiceLocator
 	defaultProvider     DefaultProviderResolver
 	envManager          environment.Manager
 	env                 *environment.Environment
@@ -55,10 +56,35 @@ var (
 )
 
 func (m *Manager) Initialize(ctx context.Context, projectPath string, options Options) error {
+	var providerEnv *environment.Environment
+	options, providerEnv = applyLayerInputMappings(options, m.env)
 	infraOptions, err := options.GetWithDefaults()
 	if err != nil {
 		return err
 	}
+
+	providerScope, ok := m.serviceLocator.(interface {
+		NewScope() (*ioc.NestedContainer, error)
+	})
+	if !ok {
+		return errors.New("provisioning service locator does not support provider scopes")
+	}
+
+	scope, err := providerScope.NewScope()
+	if err != nil {
+		return fmt.Errorf("creating infrastructure provider scope: %w", err)
+	}
+	if len(options.Inputs) > 0 {
+		providerEnvManager := &layerEnvironmentManager{
+			Manager:       m.envManager,
+			baseEnv:       m.env,
+			initialValues: providerEnv.Dotenv(),
+			inputs:        options.Inputs,
+		}
+		ioc.RegisterInstance[environment.Manager](scope, providerEnvManager)
+	}
+	ioc.RegisterInstance(scope, providerEnv)
+	m.providerLocator = scope
 
 	m.projectPath = projectPath
 	m.options = &infraOptions
@@ -95,6 +121,13 @@ func (m *Manager) State(ctx context.Context, options *StateOptions) (*StateResul
 		return nil, fmt.Errorf("error retrieving state: %w", err)
 	}
 
+	if result != nil && result.State != nil {
+		result.State.Outputs, err = applyLayerOutputMappings(result.State.Outputs, m.options.Outputs)
+		if err != nil {
+			return nil, fmt.Errorf("mapping infrastructure state outputs: %w", err)
+		}
+	}
+
 	return result, nil
 }
 
@@ -102,6 +135,22 @@ var AzdOperationsFeatureKey = alpha.MustFeatureKey("azd.operations")
 
 // Deploys the Azure infrastructure for the specified project
 func (m *Manager) Deploy(ctx context.Context) (*DeployResult, error) {
+	if len(m.options.Outputs) > 0 {
+		plannedOutputs, err := m.provider.PlannedOutputs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("getting planned outputs for mapping validation: %w", err)
+		}
+
+		// some providers, like Terraform, don't currently support planned outputs so we'll just ignore
+		// checking in those cases. It's ambiguous if they do not support it or just don't have any outputs, but a
+		// provisioned resource not having _any_ outputs seems unlikely.
+		if len(plannedOutputs) > 0 {
+			if err := validateLayerOutputMappings(plannedOutputParameters(plannedOutputs), m.options.Outputs); err != nil {
+				return nil, fmt.Errorf("validating infrastructure output mappings: %w", err)
+			}
+		}
+	}
+
 	// Apply the infrastructure deployment
 	deployResult, err := m.provider.Deploy(ctx)
 	if err != nil {
@@ -117,6 +166,15 @@ func (m *Manager) Deploy(ctx context.Context) (*DeployResult, error) {
 
 	if skippedDueToDeploymentState {
 		m.console.StopSpinner(ctx, "Didn't find new changes.", input.StepSkipped)
+	}
+
+	if err := validateLayerOutputMappings(deployResult.Deployment.Outputs, m.options.Outputs); err != nil {
+		return nil, fmt.Errorf("validating infrastructure output mappings: %w", err)
+	}
+
+	deployResult.Deployment.Outputs, err = applyLayerOutputMappings(deployResult.Deployment.Outputs, m.options.Outputs)
+	if err != nil {
+		return nil, fmt.Errorf("mapping infrastructure deployment outputs: %w", err)
 	}
 
 	if err := UpdateEnvironment(ctx, deployResult.Deployment.Outputs, m.env, m.envManager); err != nil {
@@ -318,6 +376,7 @@ func (m *Manager) Destroy(ctx context.Context, options DestroyOptions) (*Destroy
 
 	// Remove any outputs from the template from the environment since destroying the infrastructure
 	// invalidated them all.
+	destroyResult.InvalidatedEnvKeys = applyLayerOutputKeyMappings(destroyResult.InvalidatedEnvKeys, m.options.Outputs)
 	for _, key := range destroyResult.InvalidatedEnvKeys {
 		m.env.DotenvDelete(key)
 	}
@@ -536,7 +595,7 @@ func (m *Manager) newProvider(ctx context.Context) (Provider, error) {
 	}
 
 	var provider Provider
-	err = m.serviceLocator.ResolveNamed(string(providerKey), &provider)
+	err = m.providerLocator.ResolveNamed(string(providerKey), &provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed resolving IaC provider '%s': %w", providerKey, err)
 	}

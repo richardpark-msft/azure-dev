@@ -5,6 +5,8 @@ package azdext;
 option go_package = "github.com/azure/azure-dev/cli/azd/pkg/azdext;azdext";
 option csharp_namespace = "Microsoft.Azd";
 
+import "google/protobuf/struct.proto";
+
 // Messages for requests and responses
 message EmptyRequest {}
 
@@ -92,6 +94,8 @@ message ServiceConfig {
   string image = 9;
   repeated string uses = 13;
   map<string, string> environment = 14;
+  string layer = 15;
+  repeated string depends_on = 16;
 }
 
 // InfraOptions message definition
@@ -99,4 +103,5 @@ message InfraOptions {
   string provider = 1;
   string path = 2;
   string module = 3;
+  google.protobuf.Struct config = 4;
 }

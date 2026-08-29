@@ -172,22 +172,32 @@ func AnalyzeLayerDependencies(
 			)
 		}
 		for _, name := range outputs {
-			if prev, exists := g.outputProviders[name]; exists && prev != i {
+			effectiveName := name
+			if mappedName, has := layer.Outputs[name]; has {
+				effectiveName = mappedName
+			}
+			if effectiveName == "" {
+				return nil, fmt.Errorf(
+					"output %q from layer %q maps to an empty environment key",
+					name, layer.Name,
+				)
+			}
+			if prev, exists := g.outputProviders[effectiveName]; exists && prev != i {
 				// prev comes from outputProviders, which we populate only with
 				// loop indices below. Guard defensively so static analyzers can
 				// see the bounded access.
 				if prev < 0 || prev >= len(layers) {
 					return nil, fmt.Errorf(
 						"internal error: invalid layer index %d recorded for output %q",
-						prev, name,
+						prev, effectiveName,
 					)
 				}
 				return nil, fmt.Errorf(
 					"duplicate output %q: produced by both layer %q and layer %q",
-					name, layers[prev].Name, layer.Name,
+					effectiveName, layers[prev].Name, layer.Name,
 				)
 			}
-			g.outputProviders[name] = i
+			g.outputProviders[effectiveName] = i
 		}
 	}
 
@@ -201,7 +211,11 @@ func AnalyzeLayerDependencies(
 		}
 		refs, hasUnknown := discoverParamEnvRefs(ctx, resolved[i], projectPath)
 		for _, ref := range refs {
-			if provider, ok := g.outputProviders[ref]; ok && provider != i {
+			effectiveRef := ref
+			if mappedRef, has := layer.Inputs[ref]; has {
+				effectiveRef = mappedRef
+			}
+			if provider, ok := g.outputProviders[effectiveRef]; ok && provider != i {
 				// Always keep intra-graph edges, even when the ref is
 				// already in the environment from a previous run. The
 				// cached value may be stale if the producer's template

@@ -1216,6 +1216,17 @@ func (ef *envRefreshAction) Run(ctx context.Context) (*actions.ActionResult, err
 
 	layers := projectInfra.Options.GetLayers()
 	if ef.flags.layer != "" {
+		logicalLayer, err := ef.importManager.GetLayer(ctx, ef.projectConfig, ef.flags.layer)
+		if err != nil {
+			return nil, err
+		}
+		if logicalLayer.Infra == nil {
+			return nil, fmt.Errorf(
+				"layer %q has no infrastructure state to refresh: %w",
+				ef.flags.layer,
+				internal.ErrUnsupportedOperation,
+			)
+		}
 		layerOpt, err := projectInfra.Options.GetLayer(ef.flags.layer)
 		if err != nil {
 			return nil, err

@@ -2258,6 +2258,119 @@ func TestProjectService_GetConfigValue_EmptyPath(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, st.Code())
 }
 
+func TestProjectService_LayerFlow(t *testing.T) {
+	t.Parallel()
+
+	service := newProjectServiceWithYaml(t, "name: test-project\n")
+
+	added, err := service.AddLayer(t.Context(), &azdext.AddLayerRequest{
+		Layer: &azdext.LayerDefinition{
+			Name: "foundry",
+			Infra: &azdext.InfraOptions{
+				Provider: "microsoft.foundry",
+			},
+			Outputs: map[string]string{"AZURE_AI_PROJECT_ID": "FOUNDRY_PROJECT_ID"},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "foundry", added.Layer.Name)
+	require.Equal(t, "microsoft.foundry", added.Layer.Infra.Provider)
+	require.Empty(t, added.Layer.Infra.Path)
+
+	_, err = service.AddService(t.Context(), &azdext.AddServiceRequest{Service: &azdext.ServiceConfig{
+		Name:  "ai-project",
+		Layer: "foundry",
+		Host:  "containerapp",
+		Image: "example/project:latest",
+	}})
+	require.NoError(t, err)
+	_, err = service.AddService(t.Context(), &azdext.AddServiceRequest{Service: &azdext.ServiceConfig{
+		Name:      "writer-agent",
+		Layer:     "writer-agent",
+		Host:      "containerapp",
+		Image:     "example/writer:latest",
+		DependsOn: []string{"foundry"},
+	}})
+	require.NoError(t, err)
+
+	writer, err := service.GetLayer(t.Context(), &azdext.GetLayerRequest{Name: "writer-agent"})
+	require.NoError(t, err)
+	require.Nil(t, writer.Layer.Infra)
+	require.Equal(t, []string{"foundry"}, writer.Layer.DependsOn)
+	require.Contains(t, writer.Layer.Services, "writer-agent")
+
+	layers, err := service.ListLayers(t.Context(), &azdext.EmptyRequest{})
+	require.NoError(t, err)
+	require.Len(t, layers.Layers, 2)
+
+	serviceResponse, err := service.GetService(t.Context(), &azdext.GetServiceRequest{
+		ServiceName: "writer-agent",
+		Layer:       new("writer-agent"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "writer-agent", serviceResponse.Service.Layer)
+	require.Equal(t, []string{"foundry"}, serviceResponse.Service.DependsOn)
+
+	_, err = service.GetService(t.Context(), &azdext.GetServiceRequest{
+		ServiceName: "writer-agent",
+		Layer:       new("foundry"),
+	})
+	require.Equal(t, codes.NotFound, status.Code(err))
+
+	_, err = service.RemoveLayer(t.Context(), &azdext.RemoveLayerRequest{Name: "writer-agent"})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+
+	_, err = service.RemoveLayer(t.Context(), &azdext.RemoveLayerRequest{
+		Name: "foundry",
+		Mode: azdext.RemoveLayerMode_REMOVE_LAYER_MODE_CASCADE_SERVICES,
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.ErrorContains(t, err, "writer-agent")
+
+	removed, err := service.RemoveLayer(t.Context(), &azdext.RemoveLayerRequest{
+		Name: "writer-agent",
+		Mode: azdext.RemoveLayerMode_REMOVE_LAYER_MODE_CASCADE_SERVICES,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"writer-agent"}, removed.RemovedServices)
+}
+
+func TestProjectService_AddLayerRejectsRootInfra(t *testing.T) {
+	t.Parallel()
+
+	service := newProjectServiceWithYaml(t, `name: test-project
+infra:
+  provider: bicep
+`)
+
+	_, err := service.AddLayer(t.Context(), &azdext.AddLayerRequest{
+		Layer: &azdext.LayerDefinition{
+			Name:  "foundry",
+			Infra: &azdext.InfraOptions{Provider: "microsoft.foundry"},
+		},
+	})
+
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestProjectService_GetImplicitLayer(t *testing.T) {
+	t.Parallel()
+
+	service := newProjectServiceWithYaml(t, `name: test-project
+services:
+  api:
+    host: containerapp
+    image: example/api:latest
+`)
+
+	response, err := service.GetLayer(t.Context(), &azdext.GetLayerRequest{})
+
+	require.NoError(t, err)
+	require.True(t, response.Layer.Implicit)
+	require.Equal(t, "", response.Layer.Name)
+	require.Contains(t, response.Layer.Services, "api")
+}
+
 func TestProjectService_GetConfigValue_Found(t *testing.T) {
 	t.Parallel()
 	svc := newProjectServiceWithYaml(t, "name: test-project\n")

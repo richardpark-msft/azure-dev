@@ -69,6 +69,9 @@ func (im *ImportManager) ServiceStable(ctx context.Context, projectConfig *Proje
 				if err != nil {
 					return nil, fmt.Errorf("importing services: %w", err)
 				}
+				for _, importedService := range services {
+					importedService.Layer = svcConfig.Layer
+				}
 
 				// TODO(ellismg): We should consider if we should prefix these services so the are of the form
 				// "app:frontend" instead of just "frontend". Perhaps both as the key here and and as the .Name

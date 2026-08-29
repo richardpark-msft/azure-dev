@@ -31,6 +31,7 @@ type upFlags struct {
 	cmd.DeployFlags
 	global *internal.GlobalCommandOptions
 	internal.EnvFlag
+	includeDependencies bool
 	// flagSet is captured during Bind so the action can iterate the
 	// changed flag set when emitting synthetic cmd.package / cmd.provision
 	// telemetry spans (preserves nested cmd.* span shape from the legacy
@@ -43,6 +44,12 @@ func (u *upFlags) Bind(local *pflag.FlagSet, global *internal.GlobalCommandOptio
 	u.EnvFlag.Bind(local, global)
 	u.global = global
 	u.flagSet = local
+	local.BoolVar(
+		&u.includeDependencies,
+		"include-dependencies",
+		false,
+		"Include transitive dependencies of the selected project layer.",
+	)
 
 	u.ProvisionFlags.BindNonCommon(local, global)
 	u.ProvisionFlags.SetCommon(&u.EnvFlag)
@@ -58,13 +65,16 @@ func newUpFlags(cmd *cobra.Command, global *internal.GlobalCommandOptions) *upFl
 }
 
 func newUpCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "up",
+	cmd := &cobra.Command{
+		Use:   "up [<layer>]",
 		Short: "Provision and deploy your project to Azure with a single command.",
 	}
+	cmd.Args = cobra.MaximumNArgs(1)
+	return cmd
 }
 
 type upAction struct {
+	args                []string
 	flags               *upFlags
 	console             input.Console
 	env                 *environment.Environment
@@ -78,6 +88,7 @@ type upAction struct {
 }
 
 func newUpAction(
+	args []string,
 	flags *upFlags,
 	console input.Console,
 	env *environment.Environment,
@@ -90,6 +101,7 @@ func newUpAction(
 	upGraph *cmd.UpGraphAction,
 ) actions.Action {
 	return &upAction{
+		args:                args,
 		flags:               flags,
 		console:             console,
 		env:                 env,
@@ -149,11 +161,68 @@ func (u *upAction) Run(ctx context.Context) (*actions.ActionResult, error) {
 	// custom workflow spawns (`azd package` / `provision` / `deploy`): those children carry their
 	// own provider attribution on their own spans instead of inheriting a leaked value.
 	layers := infra.Options.GetLayers()
+
+	layerName := ""
+	if len(u.args) > 0 {
+		layerName = u.args[0]
+	}
+	if u.flags.includeDependencies && layerName == "" {
+		return nil, fmt.Errorf("--include-dependencies requires a layer argument: %w", internal.ErrInvalidFlagCombination)
+	}
+
+	logicalLayers, err := u.importManager.ListLayers(ctx, u.projectConfig)
+	if err != nil {
+		return nil, err
+	}
+	selectedLogicalLayers := logicalLayers
+	targetLayers := make([]string, len(logicalLayers))
+	for i, layer := range logicalLayers {
+		targetLayers[i] = layer.Name
+	}
+
+	var selectedServices map[string]struct{}
+	if layerName != "" {
+		selectedLogicalLayers, err = project.SelectLayers(logicalLayers, layerName, u.flags.includeDependencies)
+		if err != nil {
+			return nil, err
+		}
+		targetLayers = []string{layerName}
+
+		selectedServices = map[string]struct{}{}
+		layers = nil
+		for _, layer := range selectedLogicalLayers {
+			for _, service := range layer.Services {
+				selectedServices[service.Name] = struct{}{}
+			}
+			if layer.Infra == nil {
+				continue
+			}
+			infraLayer, err := infra.Options.GetLayer(layer.Name)
+			if err != nil {
+				return nil, err
+			}
+			layers = append(layers, infraLayer)
+		}
+	}
+	executionScope := project.NewExecutionScope(targetLayers, selectedLogicalLayers, u.flags.includeDependencies)
 	u.provisioningManager.RecordInfraProviderUsage(ctx, layers)
+
+	if _, has := u.projectConfig.Workflows["up"]; has && layerName != "" {
+		return nil, fmt.Errorf("a layer argument is not supported with custom up workflows: %w", internal.ErrUnsupportedOperation)
+	}
 
 	// TODO(weilim): remove this once we have decided if it's okay to not set AZURE_SUBSCRIPTION_ID and AZURE_LOCATION
 	// early in the up workflow in #3745
-	err = u.provisioningManager.Initialize(ctx, u.projectConfig.Path, infra.Options)
+	initializeOptions := infra.Options
+	if selectedServices != nil && len(layers) > 0 {
+		initializeOptions = layers[0]
+	}
+	if selectedServices != nil && len(layers) == 0 {
+		err = provisioning.EnsureSubscriptionAndLocation(
+			ctx, u.envManager, u.env, u.prompters, provisioning.EnsureSubscriptionAndLocationOptions{})
+	} else {
+		err = u.provisioningManager.Initialize(ctx, u.projectConfig.Path, initializeOptions)
+	}
 	if errors.Is(err, bicep.ErrEnsureEnvPreReqBicepCompileFailed) {
 		// If bicep is not available, we continue to prompt for subscription and location unfiltered
 		err = provisioning.EnsureSubscriptionAndLocation(
@@ -195,7 +264,15 @@ func (u *upAction) Run(ctx context.Context) (*actions.ActionResult, error) {
 		}, nil
 	}
 
-	return u.upGraph.Run(ctx, layers, &u.flags.DeployFlags, u.flags.flagSet, startTime)
+	return u.upGraph.Run(
+		ctx,
+		layers,
+		&u.flags.DeployFlags,
+		u.flags.flagSet,
+		startTime,
+		selectedServices,
+		executionScope,
+	)
 }
 
 func getCmdUpHelpDescription(c *cobra.Command) string {

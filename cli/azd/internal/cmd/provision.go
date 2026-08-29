@@ -132,7 +132,7 @@ type ProvisionAction struct {
 	console             input.Console
 	commandRunner       exec.CommandRunner
 	serviceLocator      ioc.ServiceLocator
-	subManager          *account.SubscriptionsManager
+	subManager          EnvironmentDetailsProvider
 	importManager       *project.ImportManager
 	alphaFeatureManager *alpha.FeatureManager
 	portalUrlBase       string
@@ -147,6 +147,12 @@ type ProvisionAction struct {
 	graphSyncConsole *syncConsole
 	graphEnvMu       *sync.Mutex
 	graphHookMu      *sync.Mutex
+}
+
+// EnvironmentDetailsProvider resolves display metadata for the current environment.
+type EnvironmentDetailsProvider interface {
+	GetSubscription(ctx context.Context, subscriptionId string) (*account.Subscription, error)
+	GetLocation(ctx context.Context, subscriptionId, locationName string) (account.Location, error)
 }
 
 func NewProvisionAction(
@@ -164,7 +170,7 @@ func NewProvisionAction(
 	serviceLocator ioc.ServiceLocator,
 	formatter output.Formatter,
 	writer io.Writer,
-	subManager *account.SubscriptionsManager,
+	subManager EnvironmentDetailsProvider,
 	alphaFeatureManager *alpha.FeatureManager,
 	cloud *cloud.Cloud,
 	defaultProvider provisioning.DefaultProviderResolver,
@@ -287,14 +293,33 @@ func (p *ProvisionAction) Run(ctx context.Context) (*actions.ActionResult, error
 	}
 
 	layers := infra.Options.GetLayers()
+	logicalLayers, err := p.importManager.ListLayers(ctx, p.projectConfig)
+	if err != nil {
+		return nil, err
+	}
+	selectedLogicalLayers := logicalLayers
+	targetLayers := make([]string, len(logicalLayers))
+	for i, logicalLayer := range logicalLayers {
+		targetLayers[i] = logicalLayer.Name
+	}
 	if layer != "" {
-		layerOption, err := infra.Options.GetLayer(layer)
+		logicalLayer, err := p.importManager.GetLayer(ctx, p.projectConfig, layer)
 		if err != nil {
 			return nil, err
 		}
-
-		layers = []provisioning.Options{layerOption}
+		if logicalLayer.Infra == nil {
+			layers = nil
+		} else {
+			layerOption, err := infra.Options.GetLayer(layer)
+			if err != nil {
+				return nil, err
+			}
+			layers = []provisioning.Options{layerOption}
+		}
+		selectedLogicalLayers = []*project.Layer{logicalLayer}
+		targetLayers = []string{layer}
 	}
+	executionScope := project.NewExecutionScope(targetLayers, selectedLogicalLayers, false)
 
 	// Record the resolved IaC provider(s) directly on the cmd.provision span up front — before the
 	// preview/multi-layer validation and provider work — so the attribute is present on success,
@@ -313,7 +338,7 @@ func (p *ProvisionAction) Run(ctx context.Context) (*actions.ActionResult, error
 	// one-node graph, or multi-layer N-node graph) and owns the shared
 	// UX — environment details banner, JSON state dumps, and OpenAI /
 	// Responsible AI error wrappers.
-	return p.provisionLayersGraph(ctx, layers, startTime, previewMode)
+	return p.provisionLayersGraph(ctx, layers, startTime, previewMode, executionScope)
 }
 
 // deployResultToUx creates the ux element to display from a provision preview

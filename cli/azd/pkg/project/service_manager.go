@@ -804,7 +804,7 @@ func OverriddenEndpoints(ctx context.Context, serviceConfig *ServiceConfig, env 
 func (sm *serviceManager) getOperationResult(serviceConfig *ServiceConfig, eventType ext.Event) (any, bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	key := fmt.Sprintf("%s:%s:%s", sm.env.Name(), serviceConfig.Name, eventType)
+	key := sm.serviceCacheKey(serviceConfig, string(eventType))
 	value, ok := sm.operationCache[key]
 
 	return value, ok
@@ -814,8 +814,12 @@ func (sm *serviceManager) getOperationResult(serviceConfig *ServiceConfig, event
 func (sm *serviceManager) setOperationResult(serviceConfig *ServiceConfig, eventType ext.Event, result any) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	key := fmt.Sprintf("%s:%s:%s", sm.env.Name(), serviceConfig.Name, eventType)
+	key := sm.serviceCacheKey(serviceConfig, string(eventType))
 	sm.operationCache[key] = result
+}
+
+func (sm *serviceManager) serviceCacheKey(serviceConfig *ServiceConfig, operation string) string {
+	return fmt.Sprintf("%s:%s:%s:%s", sm.env.Name(), serviceConfig.Layer, serviceConfig.Name, operation)
 }
 
 // cachedServiceTarget returns a cached ServiceTarget for the given service config, or resolves and caches it.
@@ -824,7 +828,7 @@ func (sm *serviceManager) cachedServiceTarget(
 	ctx context.Context,
 	serviceConfig *ServiceConfig,
 ) (ServiceTarget, error) {
-	cacheKey := fmt.Sprintf("%s:%s:serviceTarget", sm.env.Name(), serviceConfig.Name)
+	cacheKey := sm.serviceCacheKey(serviceConfig, "serviceTarget")
 
 	sm.mu.Lock()
 	if cached, ok := sm.operationCache[cacheKey]; ok {
@@ -868,7 +872,7 @@ func (sm *serviceManager) cachedTargetResource(
 	serviceConfig *ServiceConfig,
 	serviceTarget ServiceTarget,
 ) (*environment.TargetResource, error) {
-	cacheKey := fmt.Sprintf("%s:%s:targetResource", sm.env.Name(), serviceConfig.Name)
+	cacheKey := sm.serviceCacheKey(serviceConfig, "targetResource")
 
 	sm.mu.Lock()
 	if cached, ok := sm.operationCache[cacheKey]; ok {
