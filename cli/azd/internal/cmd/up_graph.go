@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -754,11 +755,23 @@ func layerDeployServiceDependencies(
 	}
 
 	return func(service *project.ServiceConfig) []string {
-		var dependencies []string
-		for _, dependencyLayer := range dependenciesByLayer[service.Layer] {
-			dependencies = append(dependencies, servicesByLayer[dependencyLayer]...)
+		dependencyServices := map[string]struct{}{}
+		visitedLayers := map[string]struct{}{}
+		var visit func(string)
+		visit = func(layerName string) {
+			for _, dependencyLayer := range dependenciesByLayer[layerName] {
+				if _, visited := visitedLayers[dependencyLayer]; visited {
+					continue
+				}
+				visitedLayers[dependencyLayer] = struct{}{}
+				for _, dependencyService := range servicesByLayer[dependencyLayer] {
+					dependencyServices[dependencyService] = struct{}{}
+				}
+				visit(dependencyLayer)
+			}
 		}
-		return dependencies
+		visit(service.Layer)
+		return slices.Sorted(maps.Keys(dependencyServices))
 	}
 }
 

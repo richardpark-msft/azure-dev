@@ -6,6 +6,7 @@ package provisioning
 import (
 	"testing"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockenv"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,9 @@ func TestApplyLayerInputMappings(t *testing.T) {
 	assert.Equal(t, "from-plan", mapped.VirtualEnv["PLANNED"])
 	assert.NotContains(t, options.VirtualEnv, "LOCAL")
 	assert.NotContains(t, env.Dotenv(), "LOCAL")
+	require.NoError(t, providerEnv.Config.Set("provider.value", "scoped"))
+	_, has := env.Config.Get("provider.value")
+	require.False(t, has, "the provider config must not share mutable state with the base environment")
 }
 
 func TestLayerEnvironmentManagerFiltersInputAliases(t *testing.T) {
@@ -50,14 +54,23 @@ func TestLayerEnvironmentManagerFiltersInputAliases(t *testing.T) {
 		Manager:       inner,
 		baseEnv:       baseEnv,
 		initialValues: map[string]string{"LOCAL": "mapped", "SHARED": "mapped", "REMOVE": "old"},
+		initialConfig: config.Clone(baseEnv.Config),
 		inputs:        map[string]string{"LOCAL": "SHARED"},
 	}
+	require.NoError(t, providerEnv.Config.Set("provider.added", "new"))
+	require.NoError(t, baseEnv.Config.Set("concurrent", "preserved"))
 
 	require.NoError(t, manager.Save(t.Context(), providerEnv))
 	require.Equal(t, "original", baseEnv.Getenv("LOCAL"))
 	require.Equal(t, "mapped", baseEnv.Getenv("SHARED"))
 	require.Equal(t, "new", baseEnv.Getenv("ADDED"))
 	require.NotContains(t, baseEnv.Dotenv(), "REMOVE")
+	value, has := baseEnv.Config.GetString("provider.added")
+	require.True(t, has)
+	require.Equal(t, "new", value)
+	value, has = baseEnv.Config.GetString("concurrent")
+	require.True(t, has)
+	require.Equal(t, "preserved", value)
 	inner.AssertExpectations(t)
 }
 

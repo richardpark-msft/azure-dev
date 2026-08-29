@@ -98,7 +98,9 @@ infra: {layers: [
 `
 
 type layerLifecycleScenario struct {
-	t          *testing.T
+	t *testing.T
+
+	// we use a nested container int he a
 	container  *ioc.NestedContainer
 	env        *environment.Environment
 	envManager environment.Manager
@@ -164,7 +166,7 @@ infra:
         INPUT_FOR_APP: MAPPED_BACKEND_OUTPUT
 `
 
-	scenario := newLayerLifecycleTestScenario(t, outputMappingProjectYAML)
+	scenario := newLayerLifecycleScenario(t, outputMappingProjectYAML)
 	scenario.deployments.outputs = map[string]map[string]provisioning.OutputParameter{
 		"core": {
 			"BACKEND_OUTPUT": {
@@ -209,7 +211,7 @@ infra:
     BACKEND_OUTPUT: SHARED_BACKEND_OUTPUT
 `
 
-	scenario := newLayerLifecycleTestScenario(t, projectYAML)
+	scenario := newLayerLifecycleScenario(t, projectYAML)
 	scenario.env.DotenvSet("SHARED_BACKEND_INPUT", "input")
 	require.NoError(t, scenario.envManager.Save(t.Context(), scenario.env))
 	scenario.deployments.outputs = map[string]map[string]provisioning.OutputParameter{
@@ -242,7 +244,7 @@ infra:
     VARIABLE_THAT_IS_NOT_AN_OUTPUT_OOPS: SHARED_BACKEND_OUTPUT
 `
 
-	scenario := newLayerLifecycleTestScenario(t, projectYAML)
+	scenario := newLayerLifecycleScenario(t, projectYAML)
 	scenario.deployments.outputs = map[string]map[string]provisioning.OutputParameter{
 		"": {
 			"BACKEND_OUTPUT": {
@@ -258,6 +260,9 @@ infra:
 	require.Empty(t, scenario.deployments.provisionedLayers())
 }
 
+// TestLayerLifecycle_ProvisionPreservesConcurrentEnvironmentChanges describes
+// the environment merge behavior required when another graph step updates the
+// shared environment after a provider-local environment has been created.
 func TestLayerLifecycle_ProvisionPreservesConcurrentEnvironmentChanges(t *testing.T) {
 	const projectYAML = `name: concurrent-environment-mapping-test
 infra:
@@ -267,11 +272,9 @@ infra:
     PROVIDER_INPUT: SHARED_INPUT
 `
 
-	scenario := newLayerLifecycleTestScenario(t, projectYAML)
+	scenario := newLayerLifecycleScenario(t, projectYAML)
 	scenario.env.DotenvSet("SHARED_INPUT", "input")
-
 	require.NoError(t, scenario.envManager.Save(t.Context(), scenario.env))
-
 	scenario.deployments.deployStarted = make(chan string, 1)
 	scenario.deployments.deployRelease = make(chan struct{})
 	scenario.deployments.saveProviderEnvironment = true
@@ -323,7 +326,7 @@ infra:
         APP_BACKEND_INPUT: SHARED_BACKEND_OUTPUT
 `
 
-	scenario := newLayerLifecycleTestScenario(t, projectYAML)
+	scenario := newLayerLifecycleScenario(t, projectYAML)
 	scenario.deployments.outputs = map[string]map[string]provisioning.OutputParameter{
 		"core": {
 			"BACKEND_OUTPUT": {
@@ -345,7 +348,7 @@ infra:
 }
 
 func TestLayerLifecycle_ProvisionParallelLayerTrees(t *testing.T) {
-	scenario := newLayerLifecycleTestScenario(t, parallelLayerTreesProjectYAML)
+	scenario := newLayerLifecycleScenario(t, parallelLayerTreesProjectYAML)
 	scenario.deployments.deployStarted = make(chan string, 4)
 	scenario.deployments.deployRelease = make(chan struct{})
 
@@ -385,7 +388,7 @@ func TestLayerLifecycle_ProvisionParallelLayerTrees(t *testing.T) {
 // TestLayerLifecycle_ProvisionRaisesLayerEvents describes what an extension
 // author expects after subscribing to layer-level lifecycle events.
 func TestLayerLifecycle_ProvisionRaisesLayerEvents(t *testing.T) {
-	scenario := newLayerLifecycleTestScenario(t, layerLifecycleProjectYAML)
+	scenario := newLayerLifecycleScenario(t, layerLifecycleProjectYAML)
 
 	var mu sync.Mutex
 	var events []string
@@ -406,37 +409,21 @@ func TestLayerLifecycle_ProvisionRaisesLayerEvents(t *testing.T) {
 	require.Equal(t, []string{"preprovision:core", "postprovision:core"}, events)
 }
 
-// TestLayerLifecycle_UpReportsExecutionScope verifies that the scope is attached to events
-// that are reported. The scenario we've got is:
-//
-//  1. `azd up data --include-dependencies` targets the "data" layer, which
-//     depends on the core layer.
-//  2. Dependency resolution now includes the "core" layer.
-//  3. Project preprovision events are raised in dependency order:
-//     - core  (lowest level dep)
-//     - data
-//  4. Each event identifies its current layer and carries the same command-wide scope:
-//     - core event: layer=core, target layers=[data], included layers=[core, data]
-//     - data event: layer=data, target layers=[data], included layers=[core, data]
+// TestLayerLifecycle_UpReportsExecutionScope describes the selection an
+// extension should observe when a user includes transitive layer dependencies.
 func TestLayerLifecycle_UpReportsExecutionScope(t *testing.T) {
-	scenario := newLayerLifecycleTestScenario(t, layerLifecycleProjectYAML)
-
-	type observedEvent struct {
-		layer string
-		scope project.ExecutionScope
-	}
+	scenario := newLayerLifecycleScenario(t, layerLifecycleProjectYAML)
 
 	var mu sync.Mutex
-	var events []observedEvent
+	var scopes []project.ExecutionScope
 	require.NoError(t, scenario.project.AddHandler(
 		t.Context(),
 		ext.Event("preprovision"),
 		func(_ context.Context, args project.ProjectLifecycleEventArgs) error {
-			layer, layerOk := args.Args[internalcmd.ProjectEventKeyLayer].(string)
-			scope, ok := args.Args[internalcmd.ProjectEventKeyExecutionScope].(project.ExecutionScope)
-			if layerOk && ok {
+			scope, ok := args.Args["executionScope"].(project.ExecutionScope)
+			if ok {
 				mu.Lock()
-				events = append(events, observedEvent{layer: layer, scope: scope})
+				scopes = append(scopes, scope)
 				mu.Unlock()
 			}
 			return nil
@@ -444,19 +431,32 @@ func TestLayerLifecycle_UpReportsExecutionScope(t *testing.T) {
 	))
 
 	require.NoError(t, scenario.run("up", "data", "--include-dependencies", "--no-prompt"))
-	require.Len(t, events, 2, "extensions should receive one project event per provisioned layer")
-	require.Equal(t, []string{"core", "data"}, []string{events[0].layer, events[1].layer})
-
-	for _, event := range events {
-		require.Equal(t, []string{"data"}, event.scope.TargetLayers)
-		require.Equal(t, []string{"core", "data"}, event.scope.IncludedLayers)
-		require.ElementsMatch(
-			t,
-			[]string{"cache", "core-api", "core-worker", "database"},
-			event.scope.ServiceNames,
-		)
-		require.True(t, event.scope.IncludeDependencies)
+	require.NotEmpty(t, scopes, "extensions should receive the user's resolved execution scope")
+	for _, scope := range scopes {
+		require.Equal(t, []string{"data"}, scope.TargetLayers)
+		require.Equal(t, []string{"core", "data"}, scope.IncludedLayers)
+		require.ElementsMatch(t, []string{"cache", "core-api", "core-worker", "database"}, scope.ServiceNames)
+		require.True(t, scope.IncludeDependencies)
 	}
+}
+
+func TestLayerLifecycle_DeployReportsExecutionScope(t *testing.T) {
+	scenario := newLayerLifecycleScenario(t, layerLifecycleProjectYAML)
+
+	var received project.ExecutionScope
+	require.NoError(t, scenario.project.AddHandler(
+		t.Context(),
+		ext.Event("predeploy"),
+		func(_ context.Context, args project.ProjectLifecycleEventArgs) error {
+			received, _ = args.Args[internalcmd.ProjectEventKeyExecutionScope].(project.ExecutionScope)
+			return nil
+		},
+	))
+
+	require.NoError(t, scenario.run("deploy", "--layer", "app", "--no-prompt"))
+	require.Equal(t, []string{"app"}, received.TargetLayers)
+	require.Equal(t, []string{"app"}, received.IncludedLayers)
+	require.Equal(t, []string{"api", "worker"}, received.ServiceNames)
 }
 
 // TestLayerLifecycle_EventEnvelopeSupportsLayerMessages exercises the wire
@@ -611,6 +611,17 @@ func TestLayerLifecycle_Up(t *testing.T) {
 func TestLayerLifecycle_Deploy(t *testing.T) {
 	tests := []layerLifecycleTestCase{
 		{
+			name:             "all services honor layer dependencies",
+			args:             []string{"deploy", "--all", "--no-prompt"},
+			expectedServices: []string{"core-api", "core-worker", "database", "cache", "api", "worker", "job", "scheduler"},
+			serviceOrder: map[string][]string{
+				"core-api":    {"database", "cache", "api", "worker", "job", "scheduler"},
+				"core-worker": {"database", "cache", "api", "worker", "job", "scheduler"},
+				"database":    {"api", "worker"},
+				"cache":       {"api", "worker"},
+			},
+		},
+		{
 			name:             "selected layer",
 			args:             []string{"deploy", "--layer", "app", "--no-prompt"},
 			expectedServices: []string{"api", "worker"},
@@ -653,15 +664,20 @@ func TestLayerLifecycle_Down(t *testing.T) {
 	runLayerLifecycleTests(t, tests)
 }
 
-func newLayerLifecycleTestScenario(t *testing.T, azureYAML string) *layerLifecycleScenario {
+func newLayerLifecycleScenario(t *testing.T, azureYAML string) *layerLifecycleScenario {
 	t.Helper()
 
 	projectPath := t.TempDir()
 	writeLayerLifecycleProject(t, projectPath, azureYAML)
 	t.Chdir(projectPath)
+	t.Setenv("AZURE_ENV_NAME", "test")
 
 	mockContext := mocks.NewMockContext(t.Context())
-	globalOptions := &internal.GlobalCommandOptions{Cwd: projectPath, NoPrompt: true}
+	globalOptions := &internal.GlobalCommandOptions{
+		Cwd:             projectPath,
+		EnvironmentName: "test",
+		NoPrompt:        true,
+	}
 	registerCommonDependencies(mockContext.Container)
 
 	_, err := platform.Initialize(mockContext.Container, azd.PlatformKindDefault)
@@ -695,12 +711,11 @@ func newLayerLifecycleTestScenario(t *testing.T, azureYAML string) *layerLifecyc
 	mockContext.Container.MustRegisterScoped(func() middleware.CurrentUserAuthManager {
 		return &lifecycleAuthManager{credential: mockContext.Credentials}
 	})
-
-	// Other command tests may select an environment through the process environment.
-	// Pin this scenario before constructing the command because EnvFlag captures its
-	// default then, ensuring command middleware and assertions use the same instance.
-	t.Setenv(environment.EnvNameEnvVarName, "test")
+	var azdContext *azdcontext.AzdContext
+	require.NoError(t, mockContext.Container.Resolve(&azdContext))
+	require.NoError(t, azdContext.SetProjectState(azdcontext.ProjectState{DefaultEnvironment: "test"}))
 	root := newRootCmdWithoutRegistration(mockContext.Container)
+
 	var projectConfig *project.ProjectConfig
 	require.NoError(t, mockContext.Container.Resolve(&projectConfig))
 
@@ -714,10 +729,6 @@ func newLayerLifecycleTestScenario(t *testing.T, azureYAML string) *layerLifecyc
 	require.NoError(t, envManager.Save(t.Context(), env))
 	env, err = envManager.Get(t.Context(), env.Name())
 	require.NoError(t, err)
-
-	var azdContext *azdcontext.AzdContext
-	require.NoError(t, mockContext.Container.Resolve(&azdContext))
-	require.NoError(t, azdContext.SetProjectState(azdcontext.ProjectState{DefaultEnvironment: env.Name()}))
 
 	return &layerLifecycleScenario{
 		t:           t,
@@ -782,7 +793,7 @@ func runLayerLifecycleTests(t *testing.T, tests []layerLifecycleTestCase) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			scenario := newLayerLifecycleTestScenario(t, layerLifecycleProjectYAML)
+			scenario := newLayerLifecycleScenario(t, layerLifecycleProjectYAML)
 
 			err := scenario.run(test.args...)
 

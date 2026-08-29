@@ -169,7 +169,8 @@ func (o *Options) Validate() error {
 
 	if len(o.Layers) > 0 {
 		anyIncompatibleFieldsSet := func() bool {
-			return o.Name != "" || o.Module != "" || o.Path != "" || o.DeploymentStacks != nil
+			return o.Name != "" || o.Module != "" || o.Path != "" || o.DeploymentStacks != nil ||
+				len(o.Inputs) > 0 || len(o.Outputs) > 0
 		}
 
 		if anyIncompatibleFieldsSet() {

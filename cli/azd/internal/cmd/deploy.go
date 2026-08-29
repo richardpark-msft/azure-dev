@@ -282,6 +282,12 @@ func (da *DeployAction) Run(ctx context.Context) (*actions.ActionResult, error) 
 			)
 		}
 	}
+	logicalLayers, err := da.importManager.ListLayers(ctx, da.projectConfig)
+	if err != nil {
+		return nil, err
+	}
+	executionScope := deployExecutionScope(logicalLayers, stableServices, da.flags.Layer)
+	deployServiceDeps := layerDeployServiceDependencies(logicalLayers, stableServices)
 
 	if err := da.projectManager.InitializeServices(ctx, stableServices); err != nil {
 		return nil, err
@@ -301,7 +307,42 @@ func (da *DeployAction) Run(ctx context.Context) (*actions.ActionResult, error) 
 	// Always deploy through the service execution graph. The graph handles
 	// any service count (including N=1) with a uniform progress tracker
 	// and the same package → publish → deploy step topology.
-	return da.deployServicesGraph(ctx, stableServices, startTime)
+	return da.deployServicesGraph(ctx, stableServices, startTime, executionScope, deployServiceDeps)
+}
+
+func deployExecutionScope(
+	layers []*project.Layer,
+	services []*project.ServiceConfig,
+	targetLayer string,
+) project.ExecutionScope {
+	selectedServices := make(map[string]struct{}, len(services))
+	serviceNames := make([]string, 0, len(services))
+	for _, service := range services {
+		selectedServices[service.Name] = struct{}{}
+		serviceNames = append(serviceNames, service.Name)
+	}
+
+	var includedLayers []string
+	for _, layer := range layers {
+		if slices.ContainsFunc(layer.Services, func(service *project.ServiceConfig) bool {
+			_, selected := selectedServices[service.Name]
+			return selected
+		}) {
+			includedLayers = append(includedLayers, layer.Name)
+		}
+	}
+	slices.Sort(serviceNames)
+	slices.Sort(includedLayers)
+
+	var targetLayers []string
+	if targetLayer != "" {
+		targetLayers = []string{targetLayer}
+	}
+	return project.ExecutionScope{
+		TargetLayers:   targetLayers,
+		IncludedLayers: includedLayers,
+		ServiceNames:   serviceNames,
+	}
 }
 
 // dotNetPackagePublishBuildGateKey groups standard .NET services whose
@@ -322,6 +363,8 @@ func (da *DeployAction) deployServicesGraph(
 	ctx context.Context,
 	stableServices []*project.ServiceConfig,
 	startTime time.Time,
+	executionScope project.ExecutionScope,
+	deployServiceDeps func(*project.ServiceConfig) []string,
 ) (*actions.ActionResult, error) {
 	deployTimeout, err := da.resolveDeployTimeout()
 	if err != nil {
@@ -380,6 +423,7 @@ func (da *DeployAction) deployServicesGraph(
 		deployTimeout:              deployTimeout,
 		maxConcurrency:             maxConcurrency,
 		fromPackage:                da.flags.fromPackage,
+		deployServiceDeps:          deployServiceDeps,
 		state:                      state,
 		packagePublishBuildGateKey: packagePublishBuildGateKey,
 		buildGateKey:               aspireBuildGateKey,
@@ -443,6 +487,9 @@ func (da *DeployAction) deployServicesGraph(
 
 	projectEventArgs := project.ProjectLifecycleEventArgs{
 		Project: da.projectConfig,
+		Args: map[string]any{
+			ProjectEventKeyExecutionScope: executionScope,
+		},
 	}
 
 	// Start the progress ticker if the tracker is active.

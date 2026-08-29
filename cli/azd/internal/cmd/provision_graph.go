@@ -24,6 +24,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/azapi"
 	"github.com/azure/azure-dev/cli/azd/pkg/azsdk/storage"
 	"github.com/azure/azure-dev/cli/azd/pkg/cloud"
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/exec"
 	"github.com/azure/azure-dev/cli/azd/pkg/exegraph"
@@ -912,9 +913,11 @@ func runProvisionSingleLayer(
 	// Snapshot the shared environment so this layer resolves parameters
 	// from current values (including outputs from prior phases).
 	envMu.Lock()
+	initialConfig := config.Clone(deps.env.Config)
 	layerEnv := environment.NewWithValues(
 		deps.env.Name(), deps.env.Dotenv(),
 	)
+	layerEnv.Config = config.Clone(initialConfig)
 	envMu.Unlock()
 
 	// Use a noop-save env manager for the per-layer manager. Saves happen
@@ -1027,6 +1030,9 @@ func runProvisionSingleLayer(
 	if deployResult.SkippedReason == provisioning.ProvisionValidationCanceledSkipped {
 		return deployResult, errValidationCanceledByUser
 	}
+	if err := mergeLayerConfigLocked(ctx, deps, envMu, initialConfig, layerEnv.Config); err != nil {
+		return deployResult, fmt.Errorf("updating environment config for layer %s: %w", stepName, err)
+	}
 
 	// ── Step 4: Env merge ──
 	if deployResult.SkippedReason == provisioning.DeploymentStateSkipped {
@@ -1136,6 +1142,25 @@ func runProvisionSingleLayer(
 	}
 
 	return deployResult, nil
+}
+
+// mergeLayerConfigLocked applies only config changes made by one infra entry.
+// Reloading first preserves values written by completed sibling entries or subprocesses.
+func mergeLayerConfigLocked(
+	ctx context.Context,
+	deps *provisionLayerDeps,
+	envMu *sync.Mutex,
+	initialConfig config.Config,
+	updatedConfig config.Config,
+) error {
+	envMu.Lock()
+	defer envMu.Unlock()
+
+	if err := deps.envManager.Reload(ctx, deps.env); err != nil {
+		return fmt.Errorf("reloading shared env: %w", err)
+	}
+	config.ApplyDelta(deps.env.Config, initialConfig, updatedConfig)
+	return deps.envManager.Save(ctx, deps.env)
 }
 
 // mergeLayerOutputsLocked merges deployment outputs into the shared env under

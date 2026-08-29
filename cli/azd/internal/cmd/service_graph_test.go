@@ -167,6 +167,21 @@ func TestLayerDeployServiceDependencies(t *testing.T) {
 	require.Empty(t, exactResolve(writer), "excluded dependency layers must not create missing graph edges")
 }
 
+func TestLayerDeployServiceDependencies_TraversesServiceLessLayers(t *testing.T) {
+	t.Parallel()
+
+	foundation := &project.ServiceConfig{Name: "foundation-api", Layer: "foundation"}
+	app := &project.ServiceConfig{Name: "app", Layer: "application"}
+	layers := []*project.Layer{
+		{Name: "foundation", Services: []*project.ServiceConfig{foundation}},
+		{Name: "tools", DependsOn: []string{"foundation"}},
+		{Name: "application", Services: []*project.ServiceConfig{app}, DependsOn: []string{"tools"}},
+	}
+
+	resolve := layerDeployServiceDependencies(layers, []*project.ServiceConfig{foundation, app})
+	require.Equal(t, []string{"foundation-api"}, resolve(app))
+}
+
 func TestServiceGraph_LayerDeployDependencies(t *testing.T) {
 	t.Parallel()
 

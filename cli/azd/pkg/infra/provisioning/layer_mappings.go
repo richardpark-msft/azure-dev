@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 )
 
@@ -23,7 +24,7 @@ func applyLayerInputMappings(options Options, env *environment.Environment) (Opt
 	}
 
 	providerEnv := environment.NewWithValues(env.Name(), env.Dotenv())
-	providerEnv.Config = env.Config
+	providerEnv.Config = config.Clone(env.Config)
 	options.VirtualEnv = maps.Clone(options.VirtualEnv)
 	for providerInput, environmentKey := range options.Inputs {
 		// Planned outputs take precedence over persisted values so planning does
@@ -54,6 +55,9 @@ type layerEnvironmentManager struct {
 	// baseEnv before provider execution. It includes input aliases derived from
 	// existing .env values and is used to identify the provider's delta.
 	initialValues map[string]string
+	// initialConfig is the infra entry's config baseline used to reconcile only
+	// provider changes back into the owning environment.
+	initialConfig config.Config
 	// inputs maps aliases used by this infra entry's provider to shared azd environment
 	// keys. Alias keys are excluded when synchronizing provider changes back into baseEnv.
 	inputs map[string]string
@@ -105,7 +109,11 @@ func (m *layerEnvironmentManager) sync(providerEnv *environment.Environment) {
 		}
 	}
 
-	m.baseEnv.Config = providerEnv.Config
+	initialConfig := m.initialConfig
+	if initialConfig == nil {
+		initialConfig = config.Clone(m.baseEnv.Config)
+	}
+	config.ApplyDelta(m.baseEnv.Config, initialConfig, providerEnv.Config)
 }
 
 // validateLayerOutputMappings makes sure the user's mapped outputs actually match

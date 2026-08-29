@@ -20,6 +20,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/azapi"
 	"github.com/azure/azure-dev/cli/azd/pkg/azsdk/storage"
 	"github.com/azure/azure-dev/cli/azd/pkg/cloud"
+	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
 	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
@@ -79,6 +80,7 @@ func (m *Manager) Initialize(ctx context.Context, projectPath string, options Op
 			Manager:       m.envManager,
 			baseEnv:       m.env,
 			initialValues: providerEnv.Dotenv(),
+			initialConfig: config.Clone(m.env.Config),
 			inputs:        options.Inputs,
 		}
 		ioc.RegisterInstance[environment.Manager](scope, providerEnvManager)

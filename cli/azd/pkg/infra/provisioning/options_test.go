@@ -214,6 +214,15 @@ func TestOptionsValidate(t *testing.T) {
 			require.Error(t, err)
 		})
 
+	t.Run("layers with mappings set at top level is invalid", func(t *testing.T) {
+		opts := &Options{
+			Inputs:  map[string]string{"LOCAL": "SHARED"},
+			Outputs: map[string]string{"OUTPUT": "SHARED_OUTPUT"},
+			Layers:  []Options{{Name: "l1"}},
+		}
+		require.Error(t, opts.Validate())
+	})
+
 	t.Run(
 		"layers with DeploymentStacks set at top level is invalid",
 		func(t *testing.T) {

@@ -88,8 +88,7 @@
                         "title": "A provisioning layer.",
                         "additionalProperties": false,
                         "required": [
-                            "name",
-                            "path"
+                            "name"
                         ],
                         "properties": {
                             "name": {
@@ -100,7 +99,7 @@
                             "path": {
                                 "type": "string",
                                 "title": "Path to the location that contains Azure provisioning templates",
-                                "description": "The relative folder path to the Azure provisioning templates for the specified provider."
+                                "description": "Optional. The relative folder path to Azure provisioning templates. Providers that do not use local templates may omit it."
                             },
                             "module": {
                                 "type": "string",
@@ -187,7 +186,9 @@
                     "then": {
                         "properties": {
                             "path": false,
-                            "module": false
+                            "module": false,
+                            "inputs": false,
+                            "outputs": false
                         }
                     }
                 }
