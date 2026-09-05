@@ -21,6 +21,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning/test"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
+	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
 	"github.com/azure/azure-dev/cli/azd/pkg/prompt"
 	"github.com/azure/azure-dev/cli/azd/test/mocks"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockaccount"
@@ -69,6 +70,145 @@ func TestProvisionInitializesEnvironment(t *testing.T) {
 
 	require.Equal(t, "00000000-0000-0000-0000-000000000000", env.GetSubscriptionId())
 	require.Equal(t, "location", env.GetLocation())
+}
+
+func TestManagerInitializeRequiresProviderScope(t *testing.T) {
+	env := environment.NewWithValues("test-env", map[string]string{
+		"AZURE_SUBSCRIPTION_ID": "SUBSCRIPTION_ID",
+		"AZURE_LOCATION":        "eastus2",
+	})
+	mockContext := mocks.NewMockContext(t.Context())
+	registerContainerDependencies(mockContext, env)
+	locator := &serviceLocatorOnly{ServiceLocator: mockContext.Container}
+	mgr := provisioning.NewManager(
+		locator,
+		defaultProvider,
+		&mockenv.MockEnvManager{},
+		env,
+		mockContext.Console,
+		mockContext.AlphaFeaturesManager,
+		nil,
+		cloud.AzurePublic(),
+	)
+
+	err := mgr.Initialize(t.Context(), "", provisioning.Options{Provider: provisioning.Test})
+
+	require.EqualError(t, err, "provisioning service locator requires a nested container for provider scopes")
+}
+
+func TestManagerInitializeWithoutInputsCreatesProviderScope(t *testing.T) {
+	env := environment.NewWithValues("test-env", map[string]string{
+		"AZURE_SUBSCRIPTION_ID": "SUBSCRIPTION_ID",
+		"AZURE_LOCATION":        "eastus2",
+	})
+	mockContext := mocks.NewMockContext(t.Context())
+	registerContainerDependencies(mockContext, env)
+	locator := &trackingServiceLocator{
+		ServiceLocator: mockContext.Container,
+		scopeSource:    mockContext.Container,
+	}
+	mgr := provisioning.NewManager(
+		locator,
+		defaultProvider,
+		&mockenv.MockEnvManager{},
+		env,
+		mockContext.Console,
+		mockContext.AlphaFeaturesManager,
+		nil,
+		cloud.AzurePublic(),
+	)
+
+	err := mgr.Initialize(t.Context(), "", provisioning.Options{Provider: provisioning.Test})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, locator.scopeCalls)
+}
+
+func TestManagerInitializeWithInputsRequiresProviderScope(t *testing.T) {
+	env := environment.NewWithValues("test-env", map[string]string{"SHARED": "value"})
+	mockContext := mocks.NewMockContext(t.Context())
+	registerContainerDependencies(mockContext, env)
+	locator := &serviceLocatorOnly{ServiceLocator: mockContext.Container}
+	mgr := provisioning.NewManager(
+		locator,
+		defaultProvider,
+		&mockenv.MockEnvManager{},
+		env,
+		mockContext.Console,
+		mockContext.AlphaFeaturesManager,
+		nil,
+		cloud.AzurePublic(),
+	)
+
+	err := mgr.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Test,
+		Inputs:   map[string]string{"LOCAL": "SHARED"},
+	})
+
+	require.EqualError(t, err, "provisioning service locator requires a nested container for provider scopes")
+}
+
+func TestManagerInitializeWithInputsUsesScopedEnvironment(t *testing.T) {
+	env := environment.NewWithValues("test-env", map[string]string{
+		"AZURE_SUBSCRIPTION_ID": "SUBSCRIPTION_ID",
+		"AZURE_LOCATION":        "eastus2",
+		"SHARED":                "value",
+	})
+	mockContext := mocks.NewMockContext(t.Context())
+	registerContainerDependencies(mockContext, env)
+
+	var providerEnv *environment.Environment
+	mockContext.Container.MustRegisterNamedTransient(
+		string(provisioning.Test),
+		func(
+			envManager environment.Manager,
+			scopedEnv *environment.Environment,
+			console input.Console,
+			prompters prompt.Prompter,
+		) provisioning.Provider {
+			providerEnv = scopedEnv
+			return test.NewTestProvider(envManager, scopedEnv, console, prompters)
+		},
+	)
+	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", mock.Anything, env).Return(nil).Twice()
+	mgr := provisioning.NewManager(
+		mockContext.Container,
+		defaultProvider,
+		envManager,
+		env,
+		mockContext.Console,
+		mockContext.AlphaFeaturesManager,
+		nil,
+		cloud.AzurePublic(),
+	)
+
+	err := mgr.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Test,
+		Inputs:   map[string]string{"LOCAL": "SHARED"},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, providerEnv)
+	require.Equal(t, "value", providerEnv.Getenv("LOCAL"))
+	_, has := env.LookupEnv("LOCAL")
+	require.False(t, has)
+	envManager.AssertExpectations(t)
+}
+
+type serviceLocatorOnly struct {
+	ioc.ServiceLocator
+}
+
+type trackingServiceLocator struct {
+	ioc.ServiceLocator
+	scopeSource *ioc.NestedContainer
+	scopeCalls  int
+}
+
+func (l *trackingServiceLocator) NewScope() (*ioc.NestedContainer, error) {
+	l.scopeCalls++
+	return l.scopeSource.NewScope()
 }
 
 func TestManagerPreview(t *testing.T) {
