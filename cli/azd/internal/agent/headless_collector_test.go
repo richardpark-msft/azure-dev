@@ -100,14 +100,16 @@ func TestHeadlessCollector_WaitForIdle_DeferredIdle(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestHeadlessCollector_PremiumRequests(t *testing.T) {
+func TestHeadlessCollector_TotalNanoAiuDebillionizes(t *testing.T) {
 	t.Parallel()
 	collector := NewHeadlessCollector()
 
+	totalNanoAiu := 2500000000.0
 	collector.HandleEvent(copilot.SessionEvent{
-		Data: &copilot.SessionShutdownData{TotalPremiumRequests: new(5.0)},
+		Data: &copilot.SessionShutdownData{TotalNanoAiu: &totalNanoAiu},
 	})
 
 	usage := collector.GetUsageMetrics()
-	require.Equal(t, float64(5), usage.PremiumRequests)
+	require.Equal(t, 2.5, usage.AICredits)
+	require.NotContains(t, usage.String(), "Premium requests")
 }

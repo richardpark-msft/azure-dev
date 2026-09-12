@@ -605,8 +605,12 @@ type CopilotUsageMetrics struct {
 	InputTokens     float64                `protobuf:"fixed64,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`             // Total input tokens consumed.
 	OutputTokens    float64                `protobuf:"fixed64,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`          // Total output tokens consumed.
 	TotalTokens     float64                `protobuf:"fixed64,4,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`             // Sum of input + output tokens.
-	BillingRate     float64                `protobuf:"fixed64,5,opt,name=billing_rate,json=billingRate,proto3" json:"billing_rate,omitempty"`             // Per-request cost multiplier (e.g., 1.0x, 2.0x).
-	PremiumRequests float64                `protobuf:"fixed64,6,opt,name=premium_requests,json=premiumRequests,proto3" json:"premium_requests,omitempty"` // Number of premium requests used.
+	// Deprecated: legacy per-request cost multiplier. Copilot AIC billing is token-based;
+	// prefer input_tokens, output_tokens, and total_tokens instead.
+	BillingRate float64 `protobuf:"fixed64,5,opt,name=billing_rate,json=billingRate,proto3" json:"billing_rate,omitempty"` // Deprecated: legacy per-request cost multiplier. Copilot AIC billing is token-based; prefer input_tokens, output_tokens, and total_tokens instead.
+	// Deprecated: premium request counts are no longer useful for Copilot AIC billing;
+	// prefer token totals instead.
+	PremiumRequests float64 `protobuf:"fixed64,6,opt,name=premium_requests,json=premiumRequests,proto3" json:"premium_requests,omitempty"` // Deprecated: premium request counts are no longer useful for Copilot AIC billing; prefer token totals instead.
 	DurationMs      float64                `protobuf:"fixed64,7,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`                // Total API duration in milliseconds.
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

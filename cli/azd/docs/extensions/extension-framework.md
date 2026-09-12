@@ -3129,7 +3129,6 @@ Returns cumulative usage metrics cached for a session.
     - `output_tokens` (double): Total output tokens consumed
     - `total_tokens` (double): Sum of input + output tokens
     - `billing_rate` (double): Per-request cost multiplier (e.g., 1.0x, 2.0x)
-    - `premium_requests` (double): Number of premium requests used
     - `duration_ms` (double): Total API duration in milliseconds
 
 #### GetFileChanges
@@ -3219,8 +3218,7 @@ metricsResp, err := copilot.GetUsageMetrics(ctx, &azdext.GetCopilotUsageMetricsR
 if err != nil {
     return fmt.Errorf("failed to get metrics: %w", err)
 }
-fmt.Printf("Total tokens: %.0f, Premium requests: %.0f\n",
-    metricsResp.Usage.TotalTokens, metricsResp.Usage.PremiumRequests)
+fmt.Printf("Total tokens: %.0f\n", metricsResp.Usage.TotalTokens)
 
 // Retrieve file changes
 changesResp, err := copilot.GetFileChanges(ctx, &azdext.GetCopilotFileChangesRequest{

@@ -293,12 +293,6 @@ func showCumulativeMetrics(
 		color.HiBlackString("•"), formatTokens(usage.OutputTokens))
 	fmt.Printf("  %s Total tokens:     %s\n",
 		color.HiBlackString("•"), formatTokens(usage.TotalTokens))
-	if usage.BillingRate > 0 {
-		fmt.Printf("  %s Billing rate:     %.0fx per request\n",
-			color.HiBlackString("•"), usage.BillingRate)
-	}
-	fmt.Printf("  %s Premium requests: %.0f\n",
-		color.HiBlackString("•"), usage.PremiumRequests)
 	if usage.DurationMs > 0 {
 		fmt.Printf("  %s API duration:     %s\n",
 			color.HiBlackString("•"), formatDuration(usage.DurationMs))
