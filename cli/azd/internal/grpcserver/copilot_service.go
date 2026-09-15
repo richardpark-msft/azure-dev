@@ -312,6 +312,7 @@ func convertUsageMetrics(usage agent.UsageMetrics) *azdext.CopilotUsageMetrics {
 		InputTokens:     usage.InputTokens,
 		OutputTokens:    usage.OutputTokens,
 		TotalTokens:     usage.TotalTokens(),
+		AiCredits:       usage.AICredits,
 		BillingRate:     usage.BillingRate,
 		PremiumRequests: usage.PremiumRequests,
 		DurationMs:      usage.DurationMS,

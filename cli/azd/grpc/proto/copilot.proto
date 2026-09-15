@@ -121,6 +121,7 @@ message CopilotUsageMetrics {
   double billing_rate = 5 [deprecated = true]; // Deprecated: legacy per-request cost multiplier. Copilot AIC billing is token-based; prefer input_tokens, output_tokens, and total_tokens instead.
   double premium_requests = 6 [deprecated = true]; // Deprecated: premium request counts are no longer useful for Copilot AIC billing; prefer token totals instead.
   double duration_ms = 7;       // Total API duration in milliseconds.
+  double ai_credits = 8;        // Total AI credits consumed.
 }
 
 // --- File change messages ---

@@ -293,6 +293,10 @@ func showCumulativeMetrics(
 		color.HiBlackString("•"), formatTokens(usage.OutputTokens))
 	fmt.Printf("  %s Total tokens:     %s\n",
 		color.HiBlackString("•"), formatTokens(usage.TotalTokens))
+	if usage.AiCredits > 0 {
+		fmt.Printf("  %s AI credits:       %s\n",
+			color.HiBlackString("•"), formatAICredits(usage.AiCredits))
+	}
 	if usage.DurationMs > 0 {
 		fmt.Printf("  %s API duration:     %s\n",
 			color.HiBlackString("•"), formatDuration(usage.DurationMs))
@@ -337,6 +341,16 @@ func formatTokens(tokens float64) string {
 		return fmt.Sprintf("%.1fK", tokens/1_000)
 	}
 	return fmt.Sprintf("%.0f", tokens)
+}
+
+func formatAICredits(credits float64) string {
+	if credits >= 1 {
+		return fmt.Sprintf("%.2f", credits)
+	}
+	if credits >= 0.01 {
+		return fmt.Sprintf("%.3f", credits)
+	}
+	return fmt.Sprintf("%.4f", credits)
 }
 
 func formatDuration(ms float64) string {
