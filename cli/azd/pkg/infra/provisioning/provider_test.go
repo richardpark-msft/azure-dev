@@ -7,9 +7,66 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestApplyInputAliases(t *testing.T) {
+	tests := []struct {
+		name     string
+		values   map[string]string
+		process  map[string]string
+		aliases  map[string]string
+		expected map[string]string
+	}{
+		{
+			name:     "overlapping sources",
+			values:   map[string]string{"A": "one", "B": "two"},
+			aliases:  map[string]string{"A": "B", "C": "A"},
+			expected: map[string]string{"A": "two", "C": "one"},
+		},
+		{
+			name:     "swapped sources",
+			values:   map[string]string{"A": "one", "B": "two"},
+			aliases:  map[string]string{"A": "B", "B": "A"},
+			expected: map[string]string{"A": "two", "B": "one"},
+		},
+		{
+			name:     "process environment source",
+			process:  map[string]string{"ALIAS_TEST_SHARED": "process-value"},
+			aliases:  map[string]string{"ALIAS_TEST_LOCAL": "ALIAS_TEST_SHARED"},
+			expected: map[string]string{"ALIAS_TEST_LOCAL": "process-value"},
+		},
+		{
+			name:     "missing source shadows local process value",
+			process:  map[string]string{"ALIAS_TEST_LOCAL": "stale-value", "ALIAS_TEST_MISSING": ""},
+			aliases:  map[string]string{"ALIAS_TEST_LOCAL": "ALIAS_TEST_MISSING"},
+			expected: map[string]string{"ALIAS_TEST_LOCAL": ""},
+		},
+		{
+			name:     "self alias",
+			values:   map[string]string{"A": "one"},
+			aliases:  map[string]string{"A": "A"},
+			expected: map[string]string{"A": "one"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for key, value := range tt.process {
+				t.Setenv(key, value)
+			}
+			env := environment.NewWithValues("test-env", tt.values)
+
+			ApplyInputAliases(env, tt.aliases)
+
+			for key, value := range tt.expected {
+				require.Equal(t, value, env.Dotenv()[key], key)
+				require.Contains(t, env.Dotenv(), key)
+			}
+		})
+	}
+}
 
 func TestOptions_GetWithDefaults(t *testing.T) {
 	// Save original defaultOptions and restore after tests
@@ -483,5 +540,80 @@ func TestOptions_Validate_Hooks(t *testing.T) {
 		}).Validate()
 
 		require.EqualError(t, err, "validating infra: 'hooks' can only be declared under 'infra.layers[]'")
+	})
+}
+
+func TestOptions_Validate_Aliases(t *testing.T) {
+	t.Run("valid layer aliases", func(t *testing.T) {
+		err := (&Options{
+			Layers: []Options{{
+				Name:          "infra-core",
+				Path:          "infra/core",
+				ParamAliases:  map[string]string{"LOCAL_INPUT": "SHARED_INPUT"},
+				OutputAliases: map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
+			}},
+		}).Validate()
+
+		require.NoError(t, err)
+	})
+
+	t.Run("aliases cannot be declared on root infra", func(t *testing.T) {
+		err := (&Options{
+			Path:         "infra",
+			ParamAliases: map[string]string{"LOCAL_INPUT": "SHARED_INPUT"},
+		}).Validate()
+
+		require.EqualError(
+			t,
+			err,
+			"validating infra: 'paramAliases' and 'outputAliases' can only be declared under 'infra.layers[]'",
+		)
+	})
+
+	t.Run("output aliases cannot share a destination", func(t *testing.T) {
+		err := (&Options{
+			Layers: []Options{{
+				Name: "infra-core",
+				Path: "infra/core",
+				OutputAliases: map[string]string{
+					"FIRST":  "SHARED_OUTPUT",
+					"SECOND": "SHARED_OUTPUT",
+				},
+			}},
+		}).Validate()
+
+		require.ErrorContains(t, err, `cannot both target "SHARED_OUTPUT"`)
+	})
+
+	t.Run("alias names cannot be empty", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			inputs  map[string]string
+			outputs map[string]string
+			wantErr string
+		}{
+			{name: "input source", inputs: map[string]string{"LOCAL_INPUT": ""},
+				wantErr: "input alias names cannot be empty"},
+			{name: "input name", inputs: map[string]string{"": "SHARED_INPUT"},
+				wantErr: "input alias names cannot be empty"},
+			{name: "output destination", outputs: map[string]string{"LOCAL_OUTPUT": ""},
+				wantErr: "output alias names cannot be empty"},
+			{name: "output name", outputs: map[string]string{"": "SHARED_OUTPUT"},
+				wantErr: "output alias names cannot be empty"},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				err := (&Options{
+					Layers: []Options{{
+						Name:          "infra-core",
+						Path:          "infra/core",
+						ParamAliases:  test.inputs,
+						OutputAliases: test.outputs,
+					}},
+				}).Validate()
+
+				require.ErrorContains(t, err, test.wantErr)
+			})
+		}
 	})
 }

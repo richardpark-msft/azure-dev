@@ -15,7 +15,6 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
 	"github.com/azure/azure-dev/cli/azd/test/mocks"
-	"github.com/azure/azure-dev/cli/azd/test/mocks/mockenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,10 +54,12 @@ func newProvisionValidationManager(
 		return dispatcher
 	})
 
+	var envManager environment.Manager
+	require.NoError(t, mockContext.Container.Resolve(&envManager))
 	mgr := provisioning.NewManager(
 		mockContext.Container,
 		defaultProvider,
-		&mockenv.MockEnvManager{},
+		envManager,
 		env,
 		mockContext.Console,
 		mockContext.AlphaFeaturesManager,

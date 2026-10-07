@@ -5,10 +5,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/azure/azure-dev/cli/azd/internal"
 	"github.com/azure/azure-dev/cli/azd/pkg/alpha"
@@ -49,6 +51,7 @@ func (m *recordingServiceManager) Initialize(
 type mockProvider struct {
 	deployResult *provisioning.DeployResult
 	deployErr    error
+	previewErr   error
 }
 
 func (p *mockProvider) Name() string { return "test" }
@@ -66,7 +69,7 @@ func (p *mockProvider) Deploy(_ context.Context) (*provisioning.DeployResult, er
 }
 
 func (p *mockProvider) Preview(_ context.Context) (*provisioning.DeployPreviewResult, error) {
-	return nil, nil
+	return nil, p.previewErr
 }
 
 func (p *mockProvider) Destroy(_ context.Context, _ provisioning.DestroyOptions) (*provisioning.DestroyResult, error) {
@@ -81,6 +84,43 @@ func (p *mockProvider) Parameters(_ context.Context) ([]provisioning.Parameter, 
 
 func (p *mockProvider) PlannedOutputs(_ context.Context) ([]provisioning.PlannedOutput, error) {
 	return nil, nil
+}
+
+func TestProvisionPreviewDoesNotReplaceManager(t *testing.T) {
+	provider := &mockProvider{previewErr: errors.New("preview failed")}
+	container := ioc.NewNestedContainer(nil)
+	ioc.RegisterNamedInstance[provisioning.Provider](container, string(provisioning.Test), provider)
+
+	env := environment.NewWithValues("test-env", map[string]string{"SHARED": "value"})
+	console := mockinput.NewMockConsole()
+	manager := provisioning.NewManager(
+		container,
+		func() (provisioning.ProviderKind, error) { return provisioning.Test, nil },
+		nil,
+		env,
+		console,
+		alpha.NewFeaturesManagerWithConfig(config.NewEmptyConfig()),
+		nil,
+		cloud.AzurePublic(),
+	)
+	action := &ProvisionAction{
+		flags:               &ProvisionFlags{},
+		provisionManager:    manager,
+		projectConfig:       &project.ProjectConfig{},
+		console:             console,
+		formatter:           &output.NoneFormatter{},
+		writer:              io.Discard,
+		alphaFeatureManager: alpha.NewFeaturesManagerWithConfig(config.NewEmptyConfig()),
+		portalUrlBase:       "https://portal.azure.com",
+	}
+
+	_, err := action.provisionPreview(t.Context(), provisioning.Options{
+		Provider:     provisioning.Test,
+		ParamAliases: map[string]string{"LOCAL": "SHARED"},
+	}, time.Time{})
+
+	require.ErrorContains(t, err, "preview failed")
+	require.Same(t, manager, action.provisionManager)
 }
 
 // TestProvisionAction_ProvisionValidationCanceled verifies that when the user declines

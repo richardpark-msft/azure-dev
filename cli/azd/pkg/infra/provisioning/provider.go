@@ -5,7 +5,9 @@ package provisioning
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"dario.cat/mergo"
 	"github.com/azure/azure-dev/cli/azd/internal/tracing"
 	"github.com/azure/azure-dev/cli/azd/internal/tracing/fields"
+	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/ext"
 )
 
@@ -61,6 +64,13 @@ type Options struct {
 	DeploymentStacks *DeploymentStacksConfig `yaml:"deploymentStacks,omitempty"`
 	// Config holds provider-specific configuration options
 	Config map[string]any `yaml:"config,omitempty"`
+
+	// ParamAliases maps layer-local environment variable names to names in the shared project environment.
+	ParamAliases map[string]string `yaml:"paramAliases,omitempty" json:"paramAliases,omitempty"`
+
+	// OutputAliases maps layer-local provisioning output names to names in the shared project environment.
+	OutputAliases map[string]string `yaml:"outputAliases,omitempty" json:"outputAliases,omitempty"`
+
 	// DependsOn lists the names of other infrastructure entries this entry must wait for
 	// before being provisioned. Use this to declare hook-mediated edges
 	// (for example, when a postprovision hook in another entry writes an
@@ -121,6 +131,47 @@ func (o Options) AbsolutePath(projectPath string) string {
 	return filepath.Join(projectPath, o.Path)
 }
 
+// ApplyOutputAliases maps layer-local output names to their shared environment names.
+func ApplyOutputAliases(
+	outputs map[string]OutputParameter,
+	aliases map[string]string,
+) (map[string]OutputParameter, error) {
+	sharedOutputs := make(map[string]OutputParameter, len(outputs))
+	sources := make(map[string]string, len(outputs))
+
+	for _, localName := range slices.Sorted(maps.Keys(outputs)) {
+		sharedName := localName
+
+		if alias, has := aliases[localName]; has {
+			sharedName = alias
+		}
+
+		if previous, has := sources[sharedName]; has && previous != localName {
+			return nil, fmt.Errorf(
+				"outputs %q and %q both target shared environment variable %q",
+				previous, localName, sharedName,
+			)
+		}
+		sources[sharedName] = localName
+		sharedOutputs[sharedName] = outputs[localName]
+	}
+
+	return sharedOutputs, nil
+}
+
+// ApplyInputAliases adds layer-local names to an environment using the values
+// of their corresponding shared environment names before any aliases are applied.
+func ApplyInputAliases(globalEnv *environment.Environment, aliases map[string]string) {
+	values := make(map[string]string, len(aliases))
+	for localName, sharedName := range aliases {
+		values[localName], _ = globalEnv.LookupEnv(sharedName)
+	}
+	for localName, value := range values {
+		// Empty values shadow inherited process variables when a source is missing.
+		globalEnv.DotenvSet(localName, value)
+	}
+}
+
 // GetLayers return the provisioning layers defined.
 // When [Options.Layers] is not defined, it returns the single layer defined.
 //
@@ -174,10 +225,14 @@ func (o *Options) validate(allowPathlessExtensionProviders bool) error {
 	if len(o.Hooks) > 0 {
 		return validateErr("infra", "'hooks' can only be declared under 'infra.layers[]'")
 	}
+	if len(o.ParamAliases) > 0 || len(o.OutputAliases) > 0 {
+		return validateErr("infra", "'paramAliases' and 'outputAliases' can only be declared under 'infra.layers[]'")
+	}
 
 	if len(o.Layers) > 0 {
 		anyIncompatibleFieldsSet := func() bool {
-			return o.Name != "" || o.Module != "" || o.Path != "" || o.DeploymentStacks != nil
+			return o.Name != "" || o.Module != "" || o.Path != "" || o.DeploymentStacks != nil ||
+				len(o.ParamAliases) > 0 || len(o.OutputAliases) > 0
 		}
 
 		if anyIncompatibleFieldsSet() {
@@ -239,6 +294,33 @@ func (o *Options) validateLayers(allowPathlessExtensionProviders bool) error {
 		if err := validateHooks(layer.Name, layer.Hooks); err != nil {
 			return err
 		}
+		if err := validateLayerAliases(layer); err != nil {
+			return fmt.Errorf("%s: %w", layer.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func validateLayerAliases(layer Options) error {
+	for localName, sharedName := range layer.ParamAliases {
+		if localName == "" || sharedName == "" {
+			return errors.New("input alias names cannot be empty")
+		}
+	}
+
+	outputDestinations := make(map[string]string, len(layer.OutputAliases))
+	for localName, sharedName := range layer.OutputAliases {
+		if localName == "" || sharedName == "" {
+			return errors.New("output alias names cannot be empty")
+		}
+		if previous, has := outputDestinations[sharedName]; has && previous != localName {
+			return fmt.Errorf(
+				"output aliases %q and %q cannot both target %q",
+				previous, localName, sharedName,
+			)
+		}
+		outputDestinations[sharedName] = localName
 	}
 
 	return nil

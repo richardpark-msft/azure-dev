@@ -164,30 +164,36 @@ func AnalyzeLayerDependencies(
 		}
 		opts := resolved[i]
 		bicepPath := resolveBicepPath(opts, projectPath)
-		outputs, err := extractBicepOutputs(ctx, bicepPath)
+		bicepOutputs, err := extractBicepOutputs(ctx, bicepPath)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"extracting outputs for layer %q: %w",
 				layer.Name, err,
 			)
 		}
-		for _, name := range outputs {
-			if prev, exists := g.outputProviders[name]; exists && prev != i {
+		for _, name := range bicepOutputs {
+			// check if the bicep output is aliased - if so, use the aliased name instead since that's
+			// what'll be saved (and consumed by others).
+			sharedName := name
+			if alias, has := layer.OutputAliases[name]; has {
+				sharedName = alias
+			}
+			if prev, exists := g.outputProviders[sharedName]; exists && prev != i {
 				// prev comes from outputProviders, which we populate only with
 				// loop indices below. Guard defensively so static analyzers can
 				// see the bounded access.
 				if prev < 0 || prev >= len(layers) {
 					return nil, fmt.Errorf(
 						"internal error: invalid layer index %d recorded for output %q",
-						prev, name,
+						prev, sharedName,
 					)
 				}
 				return nil, fmt.Errorf(
 					"duplicate output %q: produced by both layer %q and layer %q",
-					name, layers[prev].Name, layer.Name,
+					sharedName, layers[prev].Name, layer.Name,
 				)
 			}
-			g.outputProviders[name] = i
+			g.outputProviders[sharedName] = i
 		}
 	}
 
@@ -199,9 +205,13 @@ func AnalyzeLayerDependencies(
 		if !mayUseStandardParameters(layer) {
 			continue
 		}
-		refs, hasUnknown := discoverParamEnvRefs(ctx, resolved[i], projectPath)
-		for _, ref := range refs {
-			if provider, ok := g.outputProviders[ref]; ok && provider != i {
+		paramRefs, hasUnknown := discoverParamEnvRefs(ctx, resolved[i], projectPath)
+		for _, ref := range paramRefs {
+			sharedName := ref
+			if alias, has := layer.ParamAliases[ref]; has {
+				sharedName = alias
+			}
+			if provider, ok := g.outputProviders[sharedName]; ok && provider != i {
 				// Always keep intra-graph edges, even when the ref is
 				// already in the environment from a previous run. The
 				// cached value may be stale if the producer's template

@@ -34,6 +34,87 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+func TestManagerInitializesProviderWithLayerBindings(t *testing.T) {
+	mockContext := mocks.NewMockContext(t.Context())
+	sharedEnv := environment.NewWithValues("test-env", map[string]string{
+		"AZURE_SUBSCRIPTION_ID": "SUBSCRIPTION_ID",
+		"AZURE_LOCATION":        "eastus2",
+		"ENDPOINT":              "shared",
+	})
+	require.NoError(t, sharedEnv.Config.Set("infra.parameters.saved", "saved-value"))
+	require.NoError(t, sharedEnv.Config.Set("infra.parameters.removed", "obsolete-value"))
+	require.NoError(t, sharedEnv.Config.SetSecret("infra.parameters.savedSecret", "saved-secret"))
+	registerContainerDependencies(mockContext, sharedEnv)
+	var sharedManager environment.Manager
+	var sharedConsole input.Console
+	require.NoError(t, mockContext.Container.Resolve(&sharedManager))
+	require.NoError(t, mockContext.Container.Resolve(&sharedConsole))
+	sharedManager.(*mockenv.MockEnvManager).
+		On("SaveWithOptions", mock.Anything, sharedEnv, mock.Anything).
+		Return(nil)
+
+	baseManager := provisioning.NewManager(
+		mockContext.Container,
+		defaultProvider,
+		sharedManager,
+		sharedEnv,
+		sharedConsole,
+		mockContext.AlphaFeaturesManager,
+		nil,
+		cloud.AzurePublic(),
+	)
+
+	layer := provisioning.Options{
+		Provider:     provisioning.Test,
+		ParamAliases: map[string]string{"LAYER_ENDPOINT": "ENDPOINT"},
+	}
+	layerManager := baseManager.NewLayerManager(layer)
+	var layerEnv *environment.Environment
+	var layerEnvManager environment.Manager
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Test), func(
+		env *environment.Environment, manager environment.Manager, console input.Console, prompters prompt.Prompter,
+	) provisioning.Provider {
+		require.NotSame(t, sharedEnv, env)
+		require.Equal(t, "shared", env.Getenv("LAYER_ENDPOINT"))
+		require.NotSame(t, sharedManager, manager)
+		value, has := env.Config.Get("infra.parameters.saved")
+		require.True(t, has)
+		require.Equal(t, "saved-value", value)
+		secret, has := env.Config.Get("infra.parameters.savedSecret")
+		require.True(t, has)
+		require.Equal(t, "saved-secret", secret)
+		layerEnv = env
+		layerEnvManager = manager
+		return test.NewTestProvider(manager, env, console, prompters)
+	})
+	require.NoError(t, layerManager.Initialize(t.Context(), "", layer))
+
+	require.NoError(t, layerEnv.Config.Set("infra.parameters.generated", "generated-value"))
+	require.NoError(t, layerEnv.Config.SetSecret("infra.parameters.generatedSecret", "generated-secret"))
+	require.NoError(t, layerEnv.Config.Unset("infra.parameters.removed"))
+	require.NoError(t, layerEnvManager.Save(t.Context(), layerEnv))
+	value, has := sharedEnv.Config.Get("infra.parameters.generated")
+	require.True(t, has)
+	require.Equal(t, "generated-value", value)
+	secret, has := sharedEnv.Config.Get("infra.parameters.generatedSecret")
+	require.True(t, has)
+	require.Equal(t, "generated-secret", secret)
+	_, has = sharedEnv.Config.Get("infra.parameters.removed")
+	require.False(t, has)
+
+	var parentEnv *environment.Environment
+	var parentManager environment.Manager
+	var parentConsole input.Console
+	require.NoError(t, mockContext.Container.Resolve(&parentEnv))
+	require.NoError(t, mockContext.Container.Resolve(&parentManager))
+	require.NoError(t, mockContext.Container.Resolve(&parentConsole))
+	require.Same(t, sharedEnv, parentEnv)
+	require.Same(t, sharedManager, parentManager)
+	require.Same(t, sharedConsole, parentConsole)
+	require.Equal(t, "shared", sharedEnv.Getenv("ENDPOINT"))
+	require.NotContains(t, sharedEnv.Dotenv(), "LAYER_ENDPOINT")
+}
+
 func TestProvisionInitializesEnvironment(t *testing.T) {
 	env := environment.NewWithValues("test-env", nil)
 
@@ -54,6 +135,7 @@ func TestProvisionInitializesEnvironment(t *testing.T) {
 	registerContainerDependencies(mockContext, env)
 
 	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", *mockContext.Context, env).Return(nil)
 	mgr := provisioning.NewManager(
 		mockContext.Container,
 		defaultProvider,
@@ -81,6 +163,7 @@ func TestManagerPreview(t *testing.T) {
 	registerContainerDependencies(mockContext, env)
 
 	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", *mockContext.Context, env).Return(nil)
 	mgr := provisioning.NewManager(
 		mockContext.Container,
 		defaultProvider,
@@ -110,6 +193,7 @@ func TestManagerGetState(t *testing.T) {
 	registerContainerDependencies(mockContext, env)
 
 	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", *mockContext.Context, env).Return(nil)
 	mgr := provisioning.NewManager(
 		mockContext.Container,
 		defaultProvider,
@@ -139,6 +223,7 @@ func TestManagerDeploy(t *testing.T) {
 	registerContainerDependencies(mockContext, env)
 
 	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", *mockContext.Context, env).Return(nil)
 	mgr := provisioning.NewManager(
 		mockContext.Container,
 		defaultProvider,
@@ -210,6 +295,7 @@ func TestManagerDestroyWithNegativeConfirmation(t *testing.T) {
 	registerContainerDependencies(mockContext, env)
 
 	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", *mockContext.Context, env).Return(nil)
 	mgr := provisioning.NewManager(
 		mockContext.Container,
 		defaultProvider,

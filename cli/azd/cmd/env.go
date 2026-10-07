@@ -1255,8 +1255,15 @@ func (ef *envRefreshAction) Run(ctx context.Context) (*actions.ActionResult, err
 			ef.console.Message(ctx, "")
 		}
 
+		// Isolate aliased inputs so Bicep state compilation resolves the same
+		// layer-local names as provisioning without leaking those names to .env.
+		stateManager := ef.provisionManager
+		if len(layer.ParamAliases) > 0 {
+			stateManager = ef.provisionManager.NewLayerManager(layer)
+		}
+
 		// env refresh supports "BYOI" infrastructure where bicep isn't available
-		err = ef.provisionManager.Initialize(ctx, ef.projectConfig.Path, layer)
+		err = stateManager.Initialize(ctx, ef.projectConfig.Path, layer)
 		if errors.Is(err, bicep.ErrEnsureEnvPreReqBicepCompileFailed) {
 			// If bicep is not available, we continue to prompt for subscription and location unfiltered
 			err = provisioning.EnsureSubscriptionAndLocation(ctx, ef.envManager, ef.env, ef.prompters,
@@ -1276,7 +1283,7 @@ func (ef *envRefreshAction) Run(ctx context.Context) (*actions.ActionResult, err
 		}
 
 		stateOptions := provisioning.NewStateOptions(ef.flags.hint)
-		result, err := ef.provisionManager.State(ctx, stateOptions)
+		result, err := stateManager.State(ctx, stateOptions)
 		if err != nil {
 			// No deployment exists yet (for example, refresh before `azd provision`): this is
 			// informational, not an error - continue so any other layers still refresh. An
@@ -1305,7 +1312,13 @@ func (ef *envRefreshAction) Run(ctx context.Context) (*actions.ActionResult, err
 			continue
 		}
 
-		if err := provisioning.UpdateEnvironment(ctx, result.State.Outputs, ef.env, ef.envManager); err != nil {
+		sharedOutputs, err := provisioning.ApplyOutputAliases(result.State.Outputs, layer.OutputAliases)
+		if err != nil {
+			return nil, fmt.Errorf("applying output aliases for layer %s: %w", layer.Name, err)
+		}
+		result.State.Outputs = sharedOutputs
+
+		if err := provisioning.UpdateEnvironment(ctx, sharedOutputs, ef.env, ef.envManager); err != nil {
 			return nil, err
 		}
 

@@ -4,8 +4,11 @@
 package bicep
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
@@ -118,6 +121,171 @@ func TestAnalyzeLayerDependencies_LinearChain(t *testing.T) {
 	result, err := AnalyzeLayerDependencies(t.Context(), layers, dir)
 	require.NoError(t, err)
 	require.Equal(t, [][]int{{0}, {1}}, result.Levels)
+}
+
+func TestAnalyzeLayerDependencies_AliasedInputsAndOutputs(t *testing.T) {
+	writeBicep := func(tempDir string, subDir string, inputVars []string, outputVars []string) {
+		bicepDir := filepath.Join(tempDir, subDir)
+		mkTestDir(t, bicepDir)
+
+		mainBicep := ""
+		bicepParamsFile := "using './main.bicep'\n"
+
+		for _, inputVar := range inputVars {
+			mainBicep += fmt.Sprintf("param %s string\n", inputVar)
+			bicepParamsFile += fmt.Sprintf("param %s = readEnvironmentVariable('%s')\n", inputVar, strings.ToUpper(inputVar))
+		}
+
+		for _, outputVar := range outputVars {
+			mainBicep += fmt.Sprintf("output %s string = '<value ignored for tests>'\n", outputVar)
+		}
+
+		writeTestFile(t, filepath.Join(bicepDir, "main.bicep"), mainBicep)
+		writeTestFile(t, filepath.Join(bicepDir, "main.bicepparam"), bicepParamsFile)
+	}
+
+	t.Run("usingAliases", func(t *testing.T) {
+		tempDir := t.TempDir()
+
+		writeBicep(tempDir, "producer", []string{}, []string{"LOCAL_ENDPOINT"})
+
+		// the dependency, between consumer and producer, will be discovered because output
+		// aliasing puts "LOCAL_ENDPOINT" into "SHARED_ENDPOINT"
+		writeBicep(tempDir, "consumer", []string{"LOCAL_ENDPOINT"}, []string{})
+
+		layers := []provisioning.Options{
+			{
+				Name:          "producer",
+				Path:          "producer",
+				Module:        "main",
+				OutputAliases: map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT"},
+			},
+			{
+				Name:         "consumerUsingAlias",
+				Path:         "consumer",
+				Module:       "main",
+				ParamAliases: map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT"},
+			},
+			{
+				Name:         "consumer2UsingAlias",
+				Path:         "consumer",
+				Module:       "main",
+				ParamAliases: map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT"},
+			},
+		}
+
+		result, err := AnalyzeLayerDependencies(t.Context(), layers, tempDir)
+		require.NoError(t, err)
+
+		requireLayersEqual(t, [][]string{
+			{"producer"},
+			{"consumer2UsingAlias", "consumerUsingAlias"},
+		}, result.Levels, layers)
+	})
+
+	t.Run("NothingProducesEndpoint", func(t *testing.T) {
+		tempDir := t.TempDir()
+
+		writeBicep(tempDir, "consumer", []string{"SHARED_ENDPOINT"}, []string{})
+
+		layers := []provisioning.Options{
+			{
+				Name:         "consumerUsingAlias",
+				Path:         "consumer",
+				Module:       "main",
+				ParamAliases: map[string]string{"LOCAL_INPUT": "SHARED_ENDPOINT"},
+			},
+			{
+				Name:         "consumer2UsingAlias",
+				Path:         "consumer",
+				Module:       "main",
+				ParamAliases: map[string]string{"LOCAL_INPUT": "SHARED_ENDPOINT"},
+			},
+		}
+
+		result, err := AnalyzeLayerDependencies(t.Context(), layers, tempDir)
+		require.NoError(t, err)
+
+		requireLayersEqual(t, [][]string{
+			{"consumer2UsingAlias", "consumerUsingAlias"},
+		}, result.Levels, layers)
+	})
+
+	t.Run("DuplicateOutputsCauseError", func(t *testing.T) {
+		tempDir := t.TempDir()
+
+		writeBicep(tempDir, "producer1", []string{}, []string{"OUTPUT_DUPLICATED"})
+		writeBicep(tempDir, "producer2", []string{}, []string{"OUTPUT_DUPLICATED"})
+
+		layers := []provisioning.Options{
+			{
+				Name:   "producer1",
+				Path:   "producer1",
+				Module: "main",
+			},
+			{
+				Name:   "producer2",
+				Path:   "producer2",
+				Module: "main",
+			},
+		}
+
+		result, err := AnalyzeLayerDependencies(t.Context(), layers, tempDir)
+		require.EqualError(t, err,
+			"duplicate output \"OUTPUT_DUPLICATED\": produced by both layer \"producer1\" and layer \"producer2\"")
+		require.Nil(t, result)
+	})
+
+	t.Run("DuplicateOutputsCauseError", func(t *testing.T) {
+		tempDir := t.TempDir()
+
+		writeBicep(tempDir, "producer1", []string{}, []string{"OUTPUT_DUPLICATED"})
+		writeBicep(tempDir, "producer2", []string{}, []string{"OUTPUT_DUPLICATED"})
+
+		layers := []provisioning.Options{
+			{
+				Name:   "producer1",
+				Path:   "producer1",
+				Module: "main",
+				OutputAliases: map[string]string{
+					// the two producers output the same variable (at the provider level). Aliasing it makes it
+					// possible to have both items in the same deployment
+					"OUTPUT_DUPLICATED": "PRODUCER_1_OUTPUT",
+				},
+			},
+			{
+				Name:   "producer2",
+				Path:   "producer2",
+				Module: "main",
+			},
+		}
+
+		result, err := AnalyzeLayerDependencies(t.Context(), layers, tempDir)
+		require.NoError(t, err)
+
+		requireLayersEqual(t, [][]string{
+			{"producer1", "producer2"},
+		}, result.Levels, layers)
+	})
+}
+
+func requireLayersEqual(t *testing.T, expected [][]string, result [][]int, layers []provisioning.Options) {
+	var actual [][]string
+
+	for _, layerIndices := range result {
+		var tmp []string
+
+		for _, idx := range layerIndices {
+			tmp = append(tmp, layers[idx].Name)
+		}
+
+		// for convenience, alpha-sort
+		sort.Strings(tmp)
+
+		actual = append(actual, tmp)
+	}
+
+	require.Equal(t, expected, actual)
 }
 
 func TestAnalyzeLayerDependencies_Diamond(t *testing.T) {

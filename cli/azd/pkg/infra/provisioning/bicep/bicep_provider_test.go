@@ -42,6 +42,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/infra"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
+	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
 	"github.com/azure/azure-dev/cli/azd/pkg/keyvault"
 	"github.com/azure/azure-dev/cli/azd/pkg/prompt"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools/bicep"
@@ -51,6 +52,47 @@ import (
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockenv"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mocktracing"
 )
+
+func TestBicepManagerUsesLayerEnvironment(t *testing.T) {
+	mockContext := mocks.NewMockContext(t.Context())
+	var template azure.ArmTemplate
+	require.NoError(t, json.Unmarshal([]byte(paramsArmJson), &template))
+	base := createBicepProviderWithEnvAndMode(t, mockContext, template,
+		map[string]string{"ENDPOINT": "shared"}, provisioning.ModeDestroy)
+	ioc.RegisterInstance(mockContext.Container, base.env)
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Bicep), func(
+		env *environment.Environment, envManager environment.Manager, console input.Console,
+	) provisioning.Provider {
+		return NewBicepProvider(
+			base.azapi, base.bicepCli, base.resourceService, base.resourceManager, base.deploymentManager,
+			envManager, env, console,
+			prompt.NewDefaultPrompter(env, console, &mockaccount.MockAccountManager{}, nil,
+				base.resourceService, cloud.AzurePublic()),
+			base.curPrincipal, base.keyvaultService, cloud.AzurePublic(), nil, nil, mockContext.Container,
+		)
+	})
+	projectPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(projectPath, "main.parameters.json"), []byte(`{
+		"parameters": {"stringParam": {"value": "${ENDPOINT}"}}
+	}`), 0600))
+	for _, value := range []string{"layer-a", "layer-b"} {
+		layerEnv := environment.NewWithValues(base.env.Name(), base.env.Dotenv())
+		layerEnv.DotenvSet("ENDPOINT", value)
+		mgr := provisioning.NewManager(
+			mockContext.Container, nil, base.envManager, layerEnv, mockContext.Console,
+			mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+		)
+		require.NoError(t, mgr.Initialize(t.Context(), projectPath, provisioning.Options{
+			Provider: provisioning.Bicep, Path: projectPath, Mode: provisioning.ModeDestroy,
+		}))
+		parameters, err := mgr.Parameters(t.Context())
+		require.NoError(t, err)
+		require.Len(t, parameters, 1)
+		require.Equal(t, "stringParam", parameters[0].Name)
+		require.Equal(t, value, parameters[0].Value)
+	}
+	require.Equal(t, "shared", base.env.Getenv("ENDPOINT"))
+}
 
 func TestBicepPlan(t *testing.T) {
 	mockContext := mocks.NewMockContext(t.Context())

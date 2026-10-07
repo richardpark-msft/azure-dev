@@ -20,6 +20,8 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/exec"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
+	"github.com/azure/azure-dev/cli/azd/pkg/input"
+	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
 	"github.com/azure/azure-dev/cli/azd/pkg/prompt"
 	terraformTools "github.com/azure/azure-dev/cli/azd/pkg/tools/terraform"
 	"github.com/azure/azure-dev/cli/azd/test/mocks"
@@ -30,6 +32,64 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTerraformManagerUsesLayerEnvironment(t *testing.T) {
+	mockContext := mocks.NewMockContext(t.Context())
+	mockContext.CommandRunner.MockToolInPath("terraform", nil)
+	prepareGenericMocks(mockContext.CommandRunner)
+	sharedEnv := environment.NewWithValues("test-env", map[string]string{
+		"AZURE_SUBSCRIPTION_ID": "shared-subscription",
+		"AZURE_LOCATION":        "eastus2",
+		"ENDPOINT":              "shared",
+	})
+	ioc.RegisterInstance(mockContext.Container, sharedEnv)
+	mockContext.Container.MustRegisterScoped(terraformTools.NewCli)
+	var providers []*TerraformProvider
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Terraform), func(
+		cli *terraformTools.Cli, envManager environment.Manager, env *environment.Environment, console input.Console,
+	) provisioning.Provider {
+		provider := NewTerraformProvider(cli, envManager, env, console, &mockCurrentPrincipal{}, nil).(*TerraformProvider)
+		providers = append(providers, provider)
+		return provider
+	})
+
+	projectPath := t.TempDir()
+	templatePath := filepath.Join(projectPath, "parameters.json")
+	require.NoError(t, os.WriteFile(templatePath, []byte(`{"endpoint":"${ENDPOINT}"}`), 0600))
+	for _, value := range []string{"layer-a", "layer-b"} {
+		layerEnv := environment.NewWithValues(sharedEnv.Name(), sharedEnv.Dotenv())
+		layerEnv.DotenvSet("ENDPOINT", value)
+		layerEnv.SetSubscriptionId(value)
+		layerManager := &mockenv.MockEnvManager{}
+		layerManager.On("Save", mock.Anything, layerEnv).Return(nil)
+		mgr := provisioning.NewManager(
+			mockContext.Container, nil, layerManager, layerEnv, mockContext.Console,
+			mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+		)
+		require.NoError(t, mgr.Initialize(t.Context(), projectPath, provisioning.Options{
+			Provider: provisioning.Terraform, Name: value,
+		}))
+		provider := providers[len(providers)-1]
+		parameterPath := filepath.Join(projectPath, value+".json")
+		require.NoError(t, provider.createInputParametersFile(t.Context(), templatePath, parameterPath))
+		contents, err := os.ReadFile(parameterPath)
+		require.NoError(t, err)
+		require.JSONEq(t, fmt.Sprintf(`{"endpoint":%q}`, value), string(contents))
+	}
+
+	require.NotSame(t, providers[0].cli, providers[1].cli)
+	mockContext.CommandRunner.When(func(args exec.RunArgs, command string) bool {
+		return strings.Contains(command, "validate")
+	}).RespondFn(func(args exec.RunArgs) (exec.RunResult, error) {
+		require.Contains(t, args.Env, "ARM_SUBSCRIPTION_ID=layer-a")
+		require.NotContains(t, args.Env, "ARM_SUBSCRIPTION_ID=layer-b")
+		return exec.RunResult{}, nil
+	})
+	_, err := providers[0].cli.Validate(t.Context(), projectPath)
+	require.NoError(t, err)
+	require.Equal(t, "shared", sharedEnv.Getenv("ENDPOINT"))
+	require.Equal(t, "shared-subscription", sharedEnv.GetSubscriptionId())
+}
 
 func TestTerraformPlan(t *testing.T) {
 	skipIfTerraformNotInstalled(t)

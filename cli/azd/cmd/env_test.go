@@ -1379,6 +1379,27 @@ func (p *mockRefreshProvider) PlannedOutputs(_ context.Context) ([]provisioning.
 	return nil, nil
 }
 
+type inputAliasRefreshProvider struct {
+	*mockRefreshProvider
+	env              *environment.Environment
+	envManager       environment.Manager
+	initializedInput string
+	stateInput       string
+}
+
+func (p *inputAliasRefreshProvider) Initialize(ctx context.Context, _ string, _ provisioning.Options) error {
+	p.initializedInput = p.env.Getenv("LOCAL_INPUT")
+	// Providers may save defaults during initialization, before refresh retrieves outputs.
+	return p.envManager.Save(ctx, p.env)
+}
+
+func (p *inputAliasRefreshProvider) State(
+	ctx context.Context, options *provisioning.StateOptions,
+) (*provisioning.StateResult, error) {
+	p.stateInput = p.env.Getenv("LOCAL_INPUT")
+	return p.mockRefreshProvider.State(ctx, options)
+}
+
 // newTestEnvRefreshAction wires an envRefreshAction against a real provisioning.Manager backed by
 // the given mock provider, mirroring the setup in internal/cmd/provision_test.go.
 func newTestEnvRefreshAction(
@@ -1413,7 +1434,7 @@ func newTestEnvRefreshAction(
 	)
 
 	envManager := &mockenv.MockEnvManager{}
-	envManager.On("EnvPath", mock.Anything).Return(filepath.Join(projectDir, ".azure", "test-env", ".env"))
+	envManager.On("EnvPath", mock.Anything).Return(filepath.Join(projectDir, ".azure", "test-env", ".env")).Maybe()
 
 	pm := &mockProjectManager{}
 
@@ -1517,6 +1538,107 @@ func Test_EnvRefreshAction_Run_RefreshesOutputs(t *testing.T) {
 	require.Equal(t, "value", action.env.Dotenv()["MY_OUTPUT"])
 	envManager.AssertCalled(t, "Save", mock.Anything, mock.Anything)
 	pm.AssertExpectations(t)
+}
+
+func Test_EnvRefreshAction_Run_AppliesOutputAliases(t *testing.T) {
+	t.Parallel()
+
+	provider := &mockRefreshProvider{stateResult: &provisioning.StateResult{
+		State: &provisioning.State{
+			Outputs: map[string]provisioning.OutputParameter{
+				"LOCAL_OUTPUT": {Type: provisioning.ParameterTypeString, Value: "value"},
+			},
+		},
+	}}
+	action, _, envManager, pm := newTestEnvRefreshAction(t, provider, &envRefreshFlags{})
+	action.projectConfig.Infra.OutputAliases = map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"}
+	envManager.On("Save", mock.Anything, mock.Anything).Return(nil)
+	pm.On("InitializeFrameworks", mock.Anything, mock.Anything).Return(nil, nil, nil)
+
+	result, err := action.Run(t.Context())
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "value", action.env.Dotenv()["SHARED_OUTPUT"])
+	require.NotContains(t, action.env.Dotenv(), "LOCAL_OUTPUT")
+	envManager.AssertCalled(t, "Save", mock.Anything, mock.Anything)
+	pm.AssertExpectations(t)
+}
+
+func Test_EnvRefreshAction_Run_InputAliases(t *testing.T) {
+	t.Parallel()
+
+	for _, collision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("output collision=%t", collision), func(t *testing.T) {
+			t.Parallel()
+
+			outputs := map[string]provisioning.OutputParameter{
+				"LOCAL_OUTPUT": {Type: provisioning.ParameterTypeString, Value: "output-value"},
+			}
+			if collision {
+				outputs["SHARED_OUTPUT"] = provisioning.OutputParameter{
+					Type: provisioning.ParameterTypeString, Value: "conflicting-value",
+				}
+			}
+			baseProvider := &mockRefreshProvider{stateResult: &provisioning.StateResult{
+				State: &provisioning.State{Outputs: outputs},
+			}}
+			action, console, envManager, pm := newTestEnvRefreshAction(t, baseProvider, &envRefreshFlags{})
+			action.env.DotenvSet("SHARED_INPUT", "input-value")
+			action.projectConfig.Infra = provisioning.Options{
+				Provider: provisioning.Test,
+				Layers: []provisioning.Options{{
+					Name:          "application",
+					Provider:      provisioning.Test,
+					Path:          "infra",
+					ParamAliases:  map[string]string{"LOCAL_INPUT": "SHARED_INPUT"},
+					OutputAliases: map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
+				}},
+			}
+			container := ioc.NewNestedContainer(nil)
+			var provider *inputAliasRefreshProvider
+			container.MustRegisterNamedTransient(string(provisioning.Test), func(
+				env *environment.Environment, manager environment.Manager,
+			) provisioning.Provider {
+				provider = &inputAliasRefreshProvider{
+					mockRefreshProvider: baseProvider, env: env, envManager: manager,
+				}
+				return provider
+			})
+			action.provisionManager = provisioning.NewManager(
+				container, nil, envManager, action.env, console,
+				action.alphaFeatureManager, nil, cloud.AzurePublic(),
+			)
+			envManager.On("SaveWithOptions", mock.Anything, action.env, mock.Anything).Return(nil)
+			if !collision {
+				envManager.On("Save", mock.Anything, action.env).Return(nil)
+				pm.On("InitializeFrameworks", mock.Anything, mock.Anything).Return(nil, nil, nil)
+			}
+
+			result, err := action.Run(t.Context())
+
+			require.NotNil(t, provider)
+			require.NotSame(t, action.env, provider.env)
+			require.Equal(t, "input-value", provider.initializedInput)
+			require.Equal(t, "input-value", provider.stateInput)
+			if collision {
+				require.ErrorContains(t, err, "applying output aliases for layer application")
+				require.Nil(t, result)
+				require.NotContains(t, action.env.Dotenv(), "SHARED_OUTPUT")
+				envManager.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
+				envManager.AssertNotCalled(t, "EnvPath", mock.Anything)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				require.Equal(t, "output-value", action.env.Getenv("SHARED_OUTPUT"))
+			}
+			require.Equal(t, "input-value", action.env.Getenv("SHARED_INPUT"))
+			require.NotContains(t, action.env.Dotenv(), "LOCAL_INPUT")
+			require.NotContains(t, action.env.Dotenv(), "LOCAL_OUTPUT")
+			envManager.AssertExpectations(t)
+			pm.AssertExpectations(t)
+		})
+	}
 }
 
 func Test_NewEnvSetSecretAction(t *testing.T) {

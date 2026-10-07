@@ -319,6 +319,9 @@ func (m *Manager) Destroy(ctx context.Context, options DestroyOptions) (*Destroy
 	// Remove any outputs from the template from the environment since destroying the infrastructure
 	// invalidated them all.
 	for _, key := range destroyResult.InvalidatedEnvKeys {
+		if alias, has := m.options.OutputAliases[key]; has {
+			key = alias
+		}
 		m.env.DotenvDelete(key)
 	}
 
@@ -507,6 +510,38 @@ func NewManager(
 	}
 }
 
+// NewLayerManager creates a manager with isolated dotenv values configured
+// with the layer's input aliases and shared environment configuration. Values
+// saved by its provider are merged into the shared environment without
+// persisting layer-local alias names. Configuration mutations must be serialized
+// with other users of the shared environment.
+func (m *Manager) NewLayerManager(layer Options) *Manager {
+	// make a clone of the environment - layers are not intended to write directly
+	layerEnv := environment.NewWithValues(m.env.Name(), m.env.Dotenv())
+
+	// TODO: this still runs afould of a config reload, might ignore for now.
+	layerEnv.Config = m.env.Config
+
+	ApplyInputAliases(layerEnv, layer.ParamAliases)
+
+	layerEnvManager := &layerEnvironmentManager{
+		Manager:      m.envManager,
+		shared:       m.env,
+		paramAliases: layer.ParamAliases,
+	}
+
+	return NewManager(
+		m.serviceLocator,
+		m.defaultProvider,
+		layerEnvManager,
+		layerEnv,
+		m.console,
+		m.alphaFeatureManager,
+		m.fileShareService,
+		m.cloud,
+	)
+}
+
 func (m *Manager) newProvider(ctx context.Context) (Provider, error) {
 	var err error
 	m.options.Provider, err = ParseProvider(m.options.Provider)
@@ -535,13 +570,66 @@ func (m *Manager) newProvider(ctx context.Context) (Provider, error) {
 		providerKey = defaultProvider
 	}
 
+	providerScope, err := m.newProviderScope()
+	if err != nil {
+		return nil, err
+	}
+
 	var provider Provider
-	err = m.serviceLocator.ResolveNamed(string(providerKey), &provider)
+	err = providerScope.ResolveNamed(string(providerKey), &provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed resolving IaC provider '%s': %w", providerKey, err)
 	}
 
 	return provider, nil
+}
+
+func (m *Manager) newProviderScope() (*ioc.NestedContainer, error) {
+	container, ok := m.serviceLocator.(*ioc.NestedContainer)
+	if !ok {
+		return nil, errors.New("provisioning provider requires a scoped service container")
+	}
+
+	scope, err := container.NewScope()
+	if err != nil {
+		return nil, fmt.Errorf("creating provisioning provider scope: %w", err)
+	}
+
+	ioc.RegisterInstance(scope, m.env)        // *environment.Environment
+	ioc.RegisterInstance(scope, m.envManager) // environment.Manager
+
+	return scope, nil
+}
+
+type layerEnvironmentManager struct {
+	environment.Manager
+	shared       *environment.Environment
+	paramAliases map[string]string
+}
+
+func (m *layerEnvironmentManager) Save(ctx context.Context, layerEnv *environment.Environment) error {
+	return m.SaveWithOptions(ctx, layerEnv, nil)
+}
+
+func (m *layerEnvironmentManager) SaveWithOptions(
+	ctx context.Context,
+	layerEnv *environment.Environment,
+	options *environment.SaveOptions,
+) error {
+	values := layerEnv.Dotenv()
+
+	// clear out any input aliases we added to the env because they're not intended
+	// to be stored or merged back after we're done.
+	for localName, sharedName := range m.paramAliases {
+		if localName != sharedName { // just in case...
+			delete(values, localName)
+		}
+	}
+	for key, value := range values {
+		m.shared.DotenvSet(key, value)
+	}
+
+	return m.Manager.SaveWithOptions(ctx, m.shared, options)
 }
 
 const (

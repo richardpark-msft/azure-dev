@@ -199,6 +199,10 @@ layers:
       - name: app-infra
         path: ./infra/app
         provider: bicep
+        paramAliases:
+          LOCAL_INPUT: SHARED_INPUT
+        outputAliases:
+          LOCAL_OUTPUT: SHARED_OUTPUT
     services:
       api:
         project: ./src/api
@@ -206,6 +210,8 @@ layers:
         language: js
 `)
 	require.NoError(t, err)
+	require.Equal(t, "SHARED_INPUT", projectConfig.Layers[0].Infra[0].ParamAliases["LOCAL_INPUT"])
+	require.Equal(t, "SHARED_OUTPUT", projectConfig.Layers[0].Infra[0].OutputAliases["LOCAL_OUTPUT"])
 
 	path := filepath.Join(t.TempDir(), "azure.yaml")
 	require.NoError(t, Save(t.Context(), projectConfig, path))
@@ -218,10 +224,19 @@ layers:
 	require.Contains(t, yaml, "- name: application")
 	require.Contains(t, yaml, "infra:")
 	require.Contains(t, yaml, "- provider: bicep")
+	require.Contains(t, yaml, "paramAliases:")
+	require.Contains(t, yaml, "outputAliases:")
 	require.Contains(t, yaml, "services:")
 	require.Contains(t, yaml, "api:")
 	require.NotContains(t, yaml, "layer: application")
 	require.Equal(t, 1, strings.Count(yaml, "layers:"))
+
+	reloaded, err := Load(t.Context(), path)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Layers, 1)
+	require.Len(t, reloaded.Layers[0].Infra, 1)
+	require.Equal(t, projectConfig.Layers[0].Infra[0].ParamAliases, reloaded.Layers[0].Infra[0].ParamAliases)
+	require.Equal(t, projectConfig.Layers[0].Infra[0].OutputAliases, reloaded.Layers[0].Infra[0].OutputAliases)
 }
 
 func TestSaveProjectLayersPreservesEmptyLayers(t *testing.T) {
@@ -296,10 +311,10 @@ func TestSaveProjectLayersRejectsMixedFormatsBeforeWrite(t *testing.T) {
 	}
 }
 
-func TestProjectLayersAlphaSchema(t *testing.T) {
-	t.Parallel()
+func loadProjectSchema(t *testing.T, version string) *jsonschema.Schema {
+	t.Helper()
 
-	rawSchema, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "schemas", "alpha", "azure.yaml.json"))
+	rawSchema, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "schemas", version, "azure.yaml.json"))
 	require.NoError(t, err)
 	var schemaDocument map[string]any
 	require.NoError(t, json.Unmarshal(rawSchema, &schemaDocument))
@@ -325,11 +340,53 @@ func TestProjectLayersAlphaSchema(t *testing.T) {
 	}
 	schema, err := compiler.Compile(resourceURI)
 	require.NoError(t, err)
+	return schema
+}
+
+func TestInfrastructureLayerAliasSchemas(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{"v1.0", "alpha"} {
+		t.Run(version, func(t *testing.T) {
+			t.Parallel()
+			schema := loadProjectSchema(t, version)
+			entry := map[string]any{
+				"name":          "application",
+				"path":          "./infra/app",
+				"paramAliases":  map[string]any{"LOCAL_INPUT": "SHARED_INPUT"},
+				"outputAliases": map[string]any{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
+			}
+			document := map[string]any{
+				"name": "layered-project",
+				"infra": map[string]any{
+					"layers": []any{entry},
+				},
+			}
+			require.NoError(t, schema.Validate(document))
+
+			for _, property := range []string{"paramAliases", "outputAliases"} {
+				validAliases := entry[property]
+				entry[property] = map[string]any{"LOCAL": ""}
+				require.Error(t, schema.Validate(document), property)
+				entry[property] = validAliases
+			}
+		})
+	}
+}
+
+func TestProjectLayersAlphaSchema(t *testing.T) {
+	t.Parallel()
+
+	schema := loadProjectSchema(t, "alpha")
 
 	layer := map[string]any{
 		"name": "application",
 		"infra": []any{map[string]any{
-			"name": "app-infra", "provider": "bicep", "path": "./infra/app",
+			"name":          "app-infra",
+			"provider":      "bicep",
+			"path":          "./infra/app",
+			"paramAliases":  map[string]any{"LOCAL_INPUT": "SHARED_INPUT"},
+			"outputAliases": map[string]any{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
 		}},
 		"services": map[string]any{
 			"api": map[string]any{"host": "containerapp", "project": "./src/api"},
@@ -475,9 +532,13 @@ infra:
     - name: network
       path: infra/network
       module: network
+      outputAliases:
+        LOCAL_VNET_ID: SHARED_VNET_ID
     - name: application
       provider: terraform
       path: infra/application
+      paramAliases:
+        VNET_ID: SHARED_VNET_ID
 services:
   api:
     host: appservice
@@ -488,6 +549,8 @@ services:
 	projectConfig, err := Parse(t.Context(), projectYaml)
 	require.NoError(t, err)
 	require.Equal(t, ProjectFormatInfraV1, projectConfig.Format())
+	require.Equal(t, "SHARED_VNET_ID", projectConfig.Infra.Layers[0].OutputAliases["LOCAL_VNET_ID"])
+	require.Equal(t, "SHARED_VNET_ID", projectConfig.Infra.Layers[1].ParamAliases["VNET_ID"])
 
 	projectFile := filepath.Join(t.TempDir(), "azure.yaml")
 	require.NoError(t, Save(t.Context(), projectConfig, projectFile))
@@ -503,12 +566,16 @@ services:
 	require.Equal(t, provisioning.Bicep, reloaded.Infra.Provider)
 	require.Len(t, reloaded.Infra.Layers, 2)
 	require.Equal(t, "network", reloaded.Infra.Layers[0].Name)
+	require.Equal(t, "SHARED_VNET_ID", reloaded.Infra.Layers[0].OutputAliases["LOCAL_VNET_ID"])
 	require.Equal(t, provisioning.Terraform, reloaded.Infra.Layers[1].Provider)
+	require.Equal(t, "SHARED_VNET_ID", reloaded.Infra.Layers[1].ParamAliases["VNET_ID"])
 	require.Contains(t, reloaded.Services, "api")
 
 	contents, err := os.ReadFile(projectFile)
 	require.NoError(t, err)
 	require.Contains(t, string(contents), "schemas/v1.0/azure.yaml.json")
+	require.Contains(t, string(contents), "paramAliases:")
+	require.Contains(t, string(contents), "outputAliases:")
 	require.NotContains(t, string(contents), "\nlayers:")
 }
 

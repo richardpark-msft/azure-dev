@@ -247,5 +247,24 @@ func Test_DownAction_Run_Deleted(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.Message)
+}
+
+func Test_DownAction_Run_RemovesAliasedOutput(t *testing.T) {
+	provider := &mockDownProvider{
+		mockRefreshProvider: &mockRefreshProvider{},
+		destroyResult: &provisioning.DestroyResult{
+			InvalidatedEnvKeys: []string{"LOCAL_ENDPOINT"},
+		},
+	}
+	action, _, _ := newTestDownAction(t, provider)
+	action.projectConfig.Infra.Layers[0].OutputAliases = map[string]string{
+		"LOCAL_ENDPOINT": "SHARED_ENDPOINT",
+	}
+	action.env.DotenvSet("SHARED_ENDPOINT", "https://example.test")
+
+	result, err := action.Run(t.Context())
+
+	require.NoError(t, err)
+	require.NotContains(t, action.env.Dotenv(), "SHARED_ENDPOINT")
 	require.Contains(t, result.Message.Header, "Your application was removed")
 }

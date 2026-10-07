@@ -114,7 +114,7 @@ func (p *ProvisionAction) provisionLayersGraph(
 
 	quiet := false // multi-layer: show "Provisioning layer: ..." banners
 
-	if len(layers) == 1 {
+	if len(layers) == 1 && !hasLayerAliases(layers[0]) {
 		// ── single-layer (non-preview) ───────────────────────────────────
 		// Build a 1-node graph using the injected provisionManager so that
 		// existing tests which mock provisionManager continue to work.
@@ -207,17 +207,27 @@ func (p *ProvisionAction) provisionLayersGraph(
 			return nil, fmt.Errorf("building provision step: %w", err)
 		}
 	} else {
-		// ── multi-layer ──────────────────────────────────────────────────
+		// ── isolated layer environments ──────────────────────────────────
 		// Each layer gets its own node. Dependencies between layers are
 		// expressed as precise producer→consumer edges derived from static
 		// bicep analysis so independent layers run concurrently.
+		//
+		// NOTE: A single layer with aliases also uses this path so aliases
+		// remain isolated from the shared project environment.
 
 		// 1. Up-front environment + feature setup. Running this serially
 		//    before any concurrent layer steps ensures the subscription /
 		//    location prompts complete exactly once and the values land in
 		//    p.env, so each per-layer env clone inherits them (no
 		//    interactive races, CI-safe).
-		if err := p.provisionManager.Initialize(ctx, p.projectConfig.Path, layers[0]); err != nil {
+		setupManager := p.provisionManager
+
+		if len(layers[0].ParamAliases) > 0 {
+			setupManager = p.provisionManager.NewLayerManager(layers[0])
+			p.provisionManager = setupManager
+		}
+
+		if err := setupManager.Initialize(ctx, p.projectConfig.Path, layers[0]); err != nil {
 			return nil, fmt.Errorf("initializing provisioning manager: %w", err)
 		}
 		p.displayEnvironmentDetails(ctx)
@@ -367,7 +377,12 @@ func (p *ProvisionAction) provisionPreview(
 	startTime time.Time,
 ) (*actions.ActionResult, error) {
 	layer.IgnoreDeploymentState = p.flags.ignoreDeploymentState
-	if err := p.provisionManager.Initialize(ctx, p.projectConfig.Path, layer); err != nil {
+	previewManager := p.provisionManager
+	if len(layer.ParamAliases) > 0 {
+		previewManager = p.provisionManager.NewLayerManager(layer)
+	}
+
+	if err := previewManager.Initialize(ctx, p.projectConfig.Path, layer); err != nil {
 		return nil, fmt.Errorf("initializing provisioning manager: %w", err)
 	}
 
@@ -383,9 +398,9 @@ func (p *ProvisionAction) provisionPreview(
 		p.console.WarnForFeature(ctx, azapi.FeatureDeploymentStacks)
 	}
 
-	deployPreviewResult, err := p.provisionManager.Preview(ctx)
+	deployPreviewResult, err := previewManager.Preview(ctx)
 	if err != nil {
-		return nil, p.wrapProvisionError(ctx, err)
+		return nil, p.wrapProvisionErrorWithManager(ctx, err, previewManager)
 	}
 
 	p.console.MessageUxItem(ctx, deployResultToUx(deployPreviewResult))
@@ -645,11 +660,19 @@ func (p *ProvisionAction) logProvisionGraphTimings(result *exegraph.RunResult) {
 // (provision.go:382-435): JSON state dump on failure, OpenAI access wrapper,
 // Responsible AI wrapper, and the provision-validation-canceled translation.
 func (p *ProvisionAction) wrapProvisionError(ctx context.Context, err error) error {
+	return p.wrapProvisionErrorWithManager(ctx, err, p.provisionManager)
+}
+
+func (p *ProvisionAction) wrapProvisionErrorWithManager(
+	ctx context.Context,
+	err error,
+	provisionManager *provisioning.Manager,
+) error {
 	return wrapProvisionError(ctx, err, provisionErrorDeps{
 		console:          p.console,
 		formatter:        p.formatter,
 		writer:           p.writer,
-		provisionManager: p.provisionManager,
+		provisionManager: provisionManager,
 		portalUrlBase:    p.portalUrlBase,
 	})
 }
@@ -877,6 +900,7 @@ func runProvisionSingleLayer(
 		deps.env.Name(), deps.env.Dotenv(),
 	)
 	envMu.Unlock()
+	provisioning.ApplyInputAliases(layerEnv, layer.ParamAliases)
 
 	// Use a noop-save env manager for the per-layer manager. Saves happen
 	// against the shared environment after outputs are merged.
@@ -978,7 +1002,7 @@ func runProvisionSingleLayer(
 	if deployResult.SkippedReason == provisioning.DeploymentStateSkipped {
 		if deployResult.Deployment != nil && len(deployResult.Deployment.Outputs) > 0 {
 			if err := mergeLayerOutputsLocked(
-				ctx, deps, envMu, stepName, deployResult.Deployment.Outputs,
+				ctx, deps, envMu, stepName, deployResult.Deployment.Outputs, layer.OutputAliases,
 			); err != nil {
 				return deployResult, fmt.Errorf(
 					"updating environment for skipped layer %s: %w", stepName, err,
@@ -989,7 +1013,7 @@ func runProvisionSingleLayer(
 		// can react to cached outputs.
 	} else {
 		if err := mergeLayerOutputsLocked(
-			ctx, deps, envMu, stepName, deployResult.Deployment.Outputs,
+			ctx, deps, envMu, stepName, deployResult.Deployment.Outputs, layer.OutputAliases,
 		); err != nil {
 			return deployResult, fmt.Errorf(
 				"updating environment for layer %s: %w", stepName, err,
@@ -1097,6 +1121,7 @@ func mergeLayerOutputsLocked(
 	envMu *sync.Mutex,
 	stepName string,
 	outputs map[string]provisioning.OutputParameter,
+	aliases map[string]string,
 ) error {
 	envMu.Lock()
 	defer envMu.Unlock()
@@ -1105,15 +1130,25 @@ func mergeLayerOutputsLocked(
 		return fmt.Errorf("reloading shared env: %w", err)
 	}
 
+	sharedOutputs, err := provisioning.ApplyOutputAliases(outputs, aliases)
+	if err != nil {
+		return fmt.Errorf("applying output aliases for layer %s: %w", stepName, err)
+	}
+
 	currentEnv := deps.env.Dotenv()
-	for key, param := range outputs {
+	for key, param := range sharedOutputs {
 		newValue := resolveOutputString(param)
 		if existing, ok := currentEnv[key]; ok && existing != newValue {
 			log.Printf("warning: layer %q overwrites env output %q", stepName, key)
 		}
 	}
 
-	return provisioning.UpdateEnvironment(ctx, outputs, deps.env, deps.envManager)
+	return provisioning.UpdateEnvironment(ctx, sharedOutputs, deps.env, deps.envManager)
+}
+
+// hasLayerAliases checks if we either param or output aliases for this layer
+func hasLayerAliases(layer provisioning.Options) bool {
+	return len(layer.ParamAliases) > 0 || len(layer.OutputAliases) > 0
 }
 
 // reloadSharedEnvLocked acquires envMu and reloads deps.env from disk,

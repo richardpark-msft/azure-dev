@@ -149,17 +149,19 @@ In-memory `sync.Map` cache keyed by SHA-256 of the full Bicep file tree:
 
 1. For zero layers: short-circuits with "No provisioning layers defined — nothing to
    provision/preview." (no graph execution, no state mutation)
-2. For `--preview`: bypasses the exegraph entirely and calls `provisionManager.Preview()`
-   directly (preview has no hooks, no env updates, no cache invalidation, and is always
-   single-layer, so a graph adds no value)
-3. For a single non-preview layer: builds a one-node exegraph whose step calls the
-   injected `provisionManager` directly, preserving bit-for-bit parity with the legacy
-   sequential path and respecting test mocks of the manager
-4. For multiple non-preview layers: calls `AnalyzeLayerDependencies`, then creates one
-   exegraph step per Bicep layer with edges from the analysis. Each layer runs against
-   a cloned environment + freshly constructed `provisioning.Manager` for safe concurrent
-   execution. Subscription / location prompts are resolved up-front (once) against the
-   shared manager before concurrent steps start, so CI runs are race-free
+2. For `--preview`: bypasses the exegraph entirely and calls `Preview()` directly
+   (preview has no hooks, no env updates, no cache invalidation, and is always
+   single-layer, so a graph adds no value). Layers with input aliases use an isolated
+   cloned environment and manager so preview resolves the same local names as provision
+3. For a single non-preview layer without variable aliases: builds a one-node exegraph
+   whose step calls the injected `provisionManager` directly, preserving bit-for-bit
+   parity with the legacy sequential path and respecting test mocks of the manager
+4. For multiple non-preview layers, or a single layer with variable aliases: calls
+   `AnalyzeLayerDependencies`, then creates one exegraph step per Bicep layer with edges
+   from the analysis. Each layer runs against a cloned environment + freshly constructed
+   `provisioning.Manager` for safe concurrent execution and alias isolation.
+   Subscription / location prompts are resolved up-front (once) against the shared
+   manager before concurrent steps start, so CI runs are race-free
 5. All step failures flow through `wrapProvisionError(ctx, unwrapStepErrors(result))` at
    the outer boundary: the scheduler's `step "X" failed:` prefix is stripped, and
    validation-cancel / JSON state dump / OpenAI-access / Responsible-AI wrappers are
@@ -457,6 +459,33 @@ Things a reader of the code should know before editing:
    mid-flight hook writes — that's the contract `dependsOn` exists to
    override. The merge / reload helpers are extracted as
    `mergeLayerOutputsLocked` / `reloadSharedEnvLocked` and tested directly.
+
+   Infrastructure entries can define local variable names without changing the
+   shared project environment contract:
+
+   ```yaml
+   infra:
+     layers:
+       - name: producer
+         path: infra/producer
+         outputAliases:
+           LOCAL_ENDPOINT: SHARED_ENDPOINT
+       - name: consumer
+         path: infra/consumer
+         paramAliases:
+           LOCAL_INPUT: SHARED_ENDPOINT
+   ```
+
+   `paramAliases` maps names read by the layer to names in the shared environment.
+   The mapping is applied only to the cloned environment before the layer
+   manager is initialized. If the shared source is absent, azd sets the
+   layer-local key to an empty value, shadowing stale dotenv or process values so they cannot bypass prompting or
+   required-parameter validation. `outputAliases` maps names returned by the
+   provisioning provider to names persisted in the shared environment;
+   unmapped outputs retain their original names. Dependency analysis resolves
+   both mappings, so the consumer above waits for the producer. Two outputs
+   cannot target the same shared name. Destroy also resolves output aliases
+   before removing invalidated values from the shared environment.
 
 9. **Build isolation is policy-driven.** The DAG builder (`service_graph.go`)
    is ecosystem-agnostic. Standard .NET package/publish operations use

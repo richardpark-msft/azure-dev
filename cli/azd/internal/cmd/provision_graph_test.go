@@ -6,18 +6,25 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/cloud"
 	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment/azdcontext"
 	"github.com/azure/azure-dev/cli/azd/pkg/exegraph"
+	"github.com/azure/azure-dev/cli/azd/pkg/ext"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning/bicep"
+	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
+	"github.com/azure/azure-dev/cli/azd/pkg/output"
+	"github.com/azure/azure-dev/cli/azd/pkg/project"
 	"github.com/azure/azure-dev/cli/azd/test/mocks"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockenv"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockinput"
@@ -328,7 +335,7 @@ func TestMergeLayerOutputsLocked_PreservesSubprocessWrites(t *testing.T) {
 	}
 
 	require.NoError(t,
-		mergeLayerOutputsLocked(t.Context(), deps, envMu, "test-layer", outputs),
+		mergeLayerOutputsLocked(t.Context(), deps, envMu, "test-layer", outputs, nil),
 	)
 
 	// Disk must contain BOTH the subprocess write AND the deploy output.
@@ -426,12 +433,12 @@ func TestMergeLayerOutputsLocked_ConcurrentMergesConverge(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		require.NoError(t,
-			mergeLayerOutputsLocked(t.Context(), deps, envMu, "layer-a", outputsA),
+			mergeLayerOutputsLocked(t.Context(), deps, envMu, "layer-a", outputsA, nil),
 		)
 	})
 	wg.Go(func() {
 		require.NoError(t,
-			mergeLayerOutputsLocked(t.Context(), deps, envMu, "layer-b", outputsB),
+			mergeLayerOutputsLocked(t.Context(), deps, envMu, "layer-b", outputsB, nil),
 		)
 	})
 	wg.Wait()
@@ -443,6 +450,233 @@ func TestMergeLayerOutputsLocked_ConcurrentMergesConverge(t *testing.T) {
 	assert.Contains(t, disk, "BASE=\"value\"", "seed value lost")
 	assert.Contains(t, disk, "FROM_A=\"a-value\"", "layer-a output clobbered by layer-b merge")
 	assert.Contains(t, disk, "FROM_B=\"b-value\"", "layer-b output clobbered by layer-a merge")
+}
+
+func TestApplyLayerInputAliases(t *testing.T) {
+	t.Setenv("SHARED_PROCESS_ENDPOINT", "https://process.example.test")
+	t.Setenv("LOCAL_MISSING", "stale-process-value")
+
+	layerEnv := environment.NewWithValues("test", map[string]string{
+		"SHARED_ENDPOINT": "https://example.test",
+		"LOCAL_MISSING":   "stale",
+	})
+
+	provisioning.ApplyInputAliases(layerEnv, map[string]string{
+		"LOCAL_ENDPOINT":         "SHARED_ENDPOINT",
+		"LOCAL_PROCESS_ENDPOINT": "SHARED_PROCESS_ENDPOINT",
+		"LOCAL_MISSING":          "SHARED_MISSING",
+	})
+
+	assert.Equal(t, "https://example.test", layerEnv.Dotenv()["LOCAL_ENDPOINT"])
+	assert.Equal(t, "https://process.example.test", layerEnv.Dotenv()["LOCAL_PROCESS_ENDPOINT"])
+	assert.Contains(t, layerEnv.Dotenv(), "LOCAL_MISSING")
+	assert.Empty(t, layerEnv.Getenv("LOCAL_MISSING"))
+	assert.Equal(t, "https://example.test", layerEnv.Dotenv()["SHARED_ENDPOINT"])
+}
+
+func TestMergeLayerOutputsLocked_AppliesAliases(t *testing.T) {
+	t.Parallel()
+
+	deps, envMu, envPath := newPropagationTestDeps(t)
+	outputs := map[string]provisioning.OutputParameter{
+		"LOCAL_ENDPOINT": {Type: provisioning.ParameterTypeString, Value: "https://example.test"},
+		"UNCHANGED":      {Type: provisioning.ParameterTypeString, Value: "value"},
+	}
+
+	require.NoError(t, mergeLayerOutputsLocked(
+		t.Context(),
+		deps,
+		envMu,
+		"test-layer",
+		outputs,
+		map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT"},
+	))
+
+	contents, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(contents), "SHARED_ENDPOINT=\"https://example.test\"")
+	assert.Contains(t, string(contents), "UNCHANGED=\"value\"")
+	assert.NotContains(t, string(contents), "LOCAL_ENDPOINT=")
+}
+
+func TestApplyLayerOutputAliases_RejectsCollision(t *testing.T) {
+	t.Parallel()
+
+	outputs := map[string]provisioning.OutputParameter{
+		"FIRST":  {Type: provisioning.ParameterTypeString, Value: "first"},
+		"SECOND": {Type: provisioning.ParameterTypeString, Value: "second"},
+	}
+
+	_, err := provisioning.ApplyOutputAliases(outputs, map[string]string{"FIRST": "SECOND"})
+	require.ErrorContains(t, err, `outputs "FIRST" and "SECOND" both target shared environment variable "SECOND"`)
+}
+
+func TestRunProvisionSingleLayer_Aliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		skippedReason provisioning.SkippedReasonType
+		collision     bool
+	}{
+		{name: "deployed"},
+		{name: "cached deployment", skippedReason: provisioning.DeploymentStateSkipped},
+		{name: "validation canceled", skippedReason: provisioning.ProvisionValidationCanceledSkipped},
+		{name: "deployed output collision", collision: true},
+		{name: "cached output collision", skippedReason: provisioning.DeploymentStateSkipped, collision: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			deps, envMu, envPath := newPropagationTestDeps(t)
+			deps.env.DotenvSet("SHARED_INPUT", "input-value")
+			require.NoError(t, deps.envManager.Save(t.Context(), deps.env))
+			before := deps.env.Dotenv()
+
+			outputs := map[string]provisioning.OutputParameter{
+				"LOCAL_OUTPUT": {Type: provisioning.ParameterTypeString, Value: "output-value"},
+				"UNCHANGED":    {Type: provisioning.ParameterTypeString, Value: "unchanged-value"},
+			}
+			if test.collision {
+				outputs["SHARED_OUTPUT"] = provisioning.OutputParameter{
+					Type: provisioning.ParameterTypeString, Value: "conflicting-value",
+				}
+			}
+			deployResult := &provisioning.DeployResult{
+				Deployment:    &provisioning.Deployment{Outputs: outputs},
+				SkippedReason: test.skippedReason,
+			}
+			if test.skippedReason == provisioning.ProvisionValidationCanceledSkipped {
+				deployResult.Deployment = nil
+			}
+
+			container := ioc.NewNestedContainer(nil)
+			deps.serviceLocator = container
+			var providerEnv *environment.Environment
+			var providerEnvManager environment.Manager
+			var providerInput string
+			container.MustRegisterNamedTransient(string(provisioning.Test), func(
+				env *environment.Environment, envManager environment.Manager,
+			) provisioning.Provider {
+				providerEnv, providerEnvManager = env, envManager
+				providerInput = env.Getenv("LOCAL_INPUT")
+				return &mockProvider{deployResult: deployResult}
+			})
+
+			result, err := runProvisionSingleLayer(t.Context(), deps, provisioning.Options{
+				Name:          "application",
+				Provider:      provisioning.Test,
+				ParamAliases:  map[string]string{"LOCAL_INPUT": "SHARED_INPUT"},
+				OutputAliases: map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
+			}, "application", mockinput.NewMockConsole(), envMu)
+
+			require.NotNil(t, providerEnv)
+			require.NotSame(t, deps.env, providerEnv)
+			require.NotSame(t, deps.envManager, providerEnvManager)
+			require.Equal(t, "input-value", providerInput)
+			require.Same(t, deployResult, result)
+			if test.skippedReason == provisioning.ProvisionValidationCanceledSkipped {
+				require.ErrorIs(t, err, errValidationCanceledByUser)
+				require.Equal(t, before, deps.env.Dotenv())
+			} else if test.collision {
+				require.ErrorContains(t, err, "applying output aliases for layer application")
+				require.Equal(t, before, deps.env.Dotenv())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "output-value", deps.env.Getenv("SHARED_OUTPUT"))
+				require.Equal(t, "unchanged-value", deps.env.Getenv("UNCHANGED"))
+				require.Equal(t, test.skippedReason, result.SkippedReason)
+			}
+			require.Equal(t, "input-value", deps.env.Getenv("SHARED_INPUT"))
+			require.NotContains(t, deps.env.Dotenv(), "LOCAL_INPUT")
+			require.NotContains(t, deps.env.Dotenv(), "LOCAL_OUTPUT")
+
+			contents, err := os.ReadFile(envPath)
+			require.NoError(t, err)
+			require.NotContains(t, string(contents), "LOCAL_INPUT=")
+			require.NotContains(t, string(contents), "LOCAL_OUTPUT=")
+			if !test.collision && test.skippedReason != provisioning.ProvisionValidationCanceledSkipped {
+				require.Contains(t, string(contents), `SHARED_OUTPUT="output-value"`)
+				require.Contains(t, string(contents), `UNCHANGED="unchanged-value"`)
+			}
+		})
+	}
+}
+
+func TestProvisionLayersGraph_AliasesUseIsolatedEnvironment(t *testing.T) {
+	t.Parallel()
+
+	for _, withInputAlias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("input aliases=%t", withInputAlias), func(t *testing.T) {
+			t.Parallel()
+
+			deps, _, _ := newPropagationTestDeps(t)
+			deps.env.DotenvSet("SHARED_INPUT", "input-value")
+			require.NoError(t, deps.envManager.Save(t.Context(), deps.env))
+			layer := provisioning.Options{
+				Name:          "application",
+				Provider:      provisioning.Test,
+				OutputAliases: map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
+			}
+			if withInputAlias {
+				layer.ParamAliases = map[string]string{"LOCAL_INPUT": "SHARED_INPUT"}
+			}
+
+			container := ioc.NewNestedContainer(nil)
+			var providerEnvs []*environment.Environment
+			var providerInputs []string
+			container.MustRegisterNamedTransient(string(provisioning.Test), func(
+				env *environment.Environment,
+			) provisioning.Provider {
+				providerEnvs = append(providerEnvs, env)
+				providerInputs = append(providerInputs, env.Getenv("LOCAL_INPUT"))
+				return &mockProvider{deployResult: &provisioning.DeployResult{
+					Deployment: &provisioning.Deployment{Outputs: map[string]provisioning.OutputParameter{
+						"LOCAL_OUTPUT": {Type: provisioning.ParameterTypeString, Value: "cached-value"},
+					}},
+					SkippedReason: provisioning.DeploymentStateSkipped,
+				}}
+			})
+			console := mockinput.NewMockConsole()
+			action := &ProvisionAction{
+				flags: &ProvisionFlags{},
+				provisionManager: provisioning.NewManager(
+					container, nil, deps.envManager, deps.env, console,
+					deps.alphaFeatureManager, nil, deps.cloud,
+				),
+				serviceLocator:      container,
+				projectConfig:       deps.projectConfig,
+				env:                 deps.env,
+				envManager:          deps.envManager,
+				console:             console,
+				formatter:           &output.NoneFormatter{},
+				writer:              io.Discard,
+				alphaFeatureManager: deps.alphaFeatureManager,
+				cloud:               deps.cloud,
+			}
+
+			result, err := action.provisionLayersGraph(t.Context(), []provisioning.Options{layer}, time.Now(), false)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, "There are no changes to provision for your application.", result.Message.Header)
+			require.Len(t, providerEnvs, 2)
+			require.NotSame(t, deps.env, providerEnvs[1])
+			if withInputAlias {
+				for i, env := range providerEnvs {
+					require.NotSame(t, deps.env, env)
+					require.Equal(t, "input-value", providerInputs[i])
+				}
+			} else {
+				require.Same(t, deps.env, providerEnvs[0])
+			}
+			require.Equal(t, "cached-value", deps.env.Getenv("SHARED_OUTPUT"))
+			require.NotContains(t, deps.env.Dotenv(), "LOCAL_INPUT")
+			require.NotContains(t, deps.env.Dotenv(), "LOCAL_OUTPUT")
+		})
+	}
 }
 
 // newPropagationTestDeps builds a minimal provisionLayerDeps backed by a
@@ -472,8 +706,17 @@ func newPropagationTestDeps(
 	envPath := localDataStore.EnvPath(env)
 
 	deps := &provisionLayerDeps{
-		env:        env,
-		envManager: envManager,
+		env:                 env,
+		envManager:          envManager,
+		alphaFeatureManager: mockContext.AlphaFeaturesManager,
+		cloud:               cloud.AzurePublic(),
+		projectPath:         root,
+		projectConfig: &project.ProjectConfig{
+			Name:            "test-project",
+			Path:            root,
+			EventDispatcher: ext.NewEventDispatcher[project.ProjectLifecycleEventArgs](project.ProjectEvents...),
+		},
+		hookMu: &sync.Mutex{},
 	}
 	return deps, &sync.Mutex{}, envPath
 }
