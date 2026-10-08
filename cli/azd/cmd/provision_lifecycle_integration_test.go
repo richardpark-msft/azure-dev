@@ -259,7 +259,10 @@ func newBicepLifecycle(t *testing.T, format string, bicepParams bool) *bicepLife
 		dir := filepath.Join(root, entry.Path)
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.bicep"), []byte(
-			"targetScope = 'subscription'\nparam layerValue string\noutput OUTPUT string = layerValue\n"), 0o600))
+			"targetScope = 'subscription'\nparam layerValue string\n"+
+				"resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {\n"+
+				"  name: 'rg-offline-lifecycle'\n  location: deployment().location\n}\n"+
+				"output OUTPUT string = layerValue\n"), 0o600))
 		if bicepParams {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "main.bicepparam"), []byte(
 				"using './main.bicep'\nparam layerValue = readEnvironmentVariable('LAYER_VALUE')\n"), 0o600))
@@ -443,10 +446,24 @@ func TestBicepLifecycle_ProvisionRefreshDown(t *testing.T) {
 				require.Equal(t, 1, lifecycle.deployments.previewCalls)
 				require.Empty(t, lifecycle.deployments.deployCalls)
 
+				require.NoError(t, lifecycle.provision("app", false))
+				require.Len(t, lifecycle.deployments.deployCalls, 1)
+				lifecycle.assertPersisted(map[string]string{"APP_OUTPUT": "app-output", "DATA_OUTPUT": ""})
+
 				require.NoError(t, lifecycle.provision("", false))
 				require.Len(t, lifecycle.deployments.deployCalls, 2)
 				require.Equal(t, "app", lifecycle.deployments.deployCalls[0].parameters["layerValue"].Value)
 				require.Equal(t, "app-output", lifecycle.deployments.deployCalls[1].parameters["layerValue"].Value)
+				for index, layer := range []string{"app", "data"} {
+					call := lifecycle.deployments.deployCalls[index]
+					require.Equal(t, "test-env-"+layer+"-deployment", call.name)
+					require.Contains(t, call.tags, azure.TagKeyAzdLayerName)
+					require.Contains(t, call.tags, azure.TagKeyAzdProjectName)
+					require.NotNil(t, call.tags[azure.TagKeyAzdLayerName])
+					require.NotNil(t, call.tags[azure.TagKeyAzdProjectName])
+					require.Equal(t, layer, *call.tags[azure.TagKeyAzdLayerName])
+					require.Equal(t, "lifecycle-test", *call.tags[azure.TagKeyAzdProjectName])
+				}
 				lifecycle.assertPersisted(map[string]string{"APP_OUTPUT": "app-output", "DATA_OUTPUT": "app-output-output"})
 
 				lifecycle.env.DotenvDelete("APP_OUTPUT")
@@ -474,6 +491,7 @@ func TestBicepLifecycle_ProvisionRefreshDown(t *testing.T) {
 	}
 }
 
+// These regressions assert the intended configuration lifecycle rather than accepting lost parameter state.
 func TestBicepLifecycle_SavedConfiguration(t *testing.T) {
 	lifecycle := newBicepLifecycle(t, "v1", false)
 	lifecycle.parameters["savedValue"] = map[string]any{"type": "string"}
@@ -506,4 +524,28 @@ func TestBicepLifecycle_PromptedConfigurationSurvivesReload(t *testing.T) {
 	require.Equal(t, "prompted-value", value)
 	lifecycle.ctx.Console.SetNoPromptMode(true)
 	require.NoError(t, lifecycle.provision("app", false))
+}
+
+func TestBicepLifecycle_GeneratedSecretSurvivesReload(t *testing.T) {
+	lifecycle := newBicepLifecycle(t, "v1", false)
+	lifecycle.parameters["generatedSecret"] = map[string]any{
+		"type": "securestring",
+		"metadata": map[string]any{
+			"azd": map[string]any{"type": "generate", "config": map[string]any{"length": 16}},
+		},
+	}
+
+	require.NoError(t, lifecycle.provision("app", false))
+
+	require.Len(t, lifecycle.deployments.deployCalls, 1)
+	deployedSecret, has := lifecycle.deployments.deployCalls[0].parameters["generatedSecret"]
+	require.True(t, has)
+	require.NotEmpty(t, deployedSecret.Value)
+	persisted, err := lifecycle.store.Get(t.Context(), lifecycle.env.Name())
+	require.NoError(t, err)
+	savedSecret, has := persisted.Config.Get("infra.parameters.generatedSecret")
+	require.True(t, has, "generated secrets must survive a real save/reload cycle")
+	require.True(t, savedSecret == deployedSecret.Value, "the persisted secret must match the deployed secret")
+	require.NoError(t, lifecycle.provision("app", false))
+	require.Len(t, lifecycle.deployments.deployCalls, 1, "persisted generated secrets must not trigger redeployment")
 }
