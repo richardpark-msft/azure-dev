@@ -144,6 +144,7 @@ Terraform dependencies are not inferred from aliases: declare
 `dependsOn: [producer]` on the consumer when it needs the producer's outputs.
 This also applies to Bicep consumers of Terraform outputs.
 Output aliases are also honored when `azd down` removes invalidated values.
+Input aliases are applied during `azd down` without persisting the layer-local names.
 
 ## Hooks
 

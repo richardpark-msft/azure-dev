@@ -316,17 +316,23 @@ func (m *Manager) Destroy(ctx context.Context, options DestroyOptions) (*Destroy
 		return nil, fmt.Errorf("error deleting Azure resources: %w", err)
 	}
 
+	env, envManager := m.env, m.envManager
+	if layerManager, ok := m.envManager.(*layerEnvironmentManager); ok {
+		// Inputs are isolated, but deleted outputs must be removed from the shared environment.
+		env, envManager = layerManager.shared, layerManager.Manager
+	}
+
 	// Remove any outputs from the template from the environment since destroying the infrastructure
 	// invalidated them all.
 	for _, key := range destroyResult.InvalidatedEnvKeys {
 		if alias, has := m.options.OutputAliases[key]; has {
 			key = alias
 		}
-		m.env.DotenvDelete(key)
+		env.DotenvDelete(key)
 	}
 
 	// Update environment files to remove invalid infrastructure parameters
-	if err := m.envManager.Save(ctx, m.env); err != nil {
+	if err := envManager.Save(ctx, env); err != nil {
 		return nil, fmt.Errorf("saving environment: %w", err)
 	}
 

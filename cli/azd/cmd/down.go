@@ -146,12 +146,17 @@ func (a *downAction) Run(ctx context.Context) (*actions.ActionResult, error) {
 		}
 
 		layer.Mode = provisioning.ModeDestroy
-		if err := a.provisionManager.Initialize(ctx, a.projectConfig.Path, layer); err != nil {
+		destroyManager := a.provisionManager
+		if len(layer.ParamAliases) > 0 {
+			destroyManager = a.provisionManager.NewLayerManager(layer)
+		}
+
+		if err := destroyManager.Initialize(ctx, a.projectConfig.Path, layer); err != nil {
 			return nil, fmt.Errorf("initializing provisioning manager: %w", err)
 		}
 
 		destroyOptions := provisioning.NewDestroyOptions(a.flags.forceDelete, a.flags.purgeDelete)
-		destroyResult, err := a.provisionManager.Destroy(ctx, destroyOptions)
+		destroyResult, err := destroyManager.Destroy(ctx, destroyOptions)
 		if errors.Is(err, inf.ErrDeploymentsNotFound) || errors.Is(err, inf.ErrDeploymentResourcesNotFound) {
 			a.console.MessageUxItem(ctx, &ux.DoneMessage{Message: "No Azure resources were found."})
 		} else if err != nil {

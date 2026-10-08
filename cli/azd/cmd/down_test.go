@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -20,9 +21,11 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/cloud"
 	"github.com/azure/azure-dev/cli/azd/pkg/config"
 	"github.com/azure/azure-dev/cli/azd/pkg/environment"
+	"github.com/azure/azure-dev/cli/azd/pkg/environment/azdcontext"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
 	"github.com/azure/azure-dev/cli/azd/pkg/project"
+	"github.com/azure/azure-dev/cli/azd/test/mocks"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockenv"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockinput"
 )
@@ -156,6 +159,19 @@ func (p *mockDownProvider) Destroy(
 	return p.destroyResult, p.destroyErr
 }
 
+type inputAliasDownProvider struct {
+	*inputAliasRefreshProvider
+	destroyResult  *provisioning.DestroyResult
+	destroyedInput string
+}
+
+func (p *inputAliasDownProvider) Destroy(
+	_ context.Context, _ provisioning.DestroyOptions,
+) (*provisioning.DestroyResult, error) {
+	p.destroyedInput = p.env.Getenv("LOCAL_INPUT")
+	return p.destroyResult, nil
+}
+
 // newTestDownAction wires a downAction against a real provisioning.Manager backed by the given
 // mock provider, mirroring newTestEnvRefreshAction.
 func newTestDownAction(
@@ -267,4 +283,88 @@ func Test_DownAction_Run_RemovesAliasedOutput(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, action.env.Dotenv(), "SHARED_ENDPOINT")
 	require.Contains(t, result.Message.Header, "Your application was removed")
+}
+
+func Test_DownAction_Run_InputAliases(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		skipped bool
+	}{
+		{name: "all layers"},
+		{name: "selected layer", args: []string{"infra"}},
+		{name: "previewed deletion", args: []string{"infra"}, skipped: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("LOCAL_INPUT", "stale-process-value")
+
+			action, console, _ := newTestDownAction(t, &mockDownProvider{})
+			action.args = test.args
+			action.projectConfig.Infra.Layers[0].ParamAliases = map[string]string{"LOCAL_INPUT": "SHARED_INPUT"}
+			action.projectConfig.Infra.Layers[0].OutputAliases = map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"}
+			action.env.DotenvSet("SHARED_INPUT", "input-value")
+			action.env.DotenvSet("SHARED_OUTPUT", "output-value")
+			action.env.DotenvSet("UNRELATED_OUTPUT", "unchanged-value")
+
+			mockContext := mocks.NewMockContext(t.Context())
+			azdCtx := azdcontext.NewAzdContextWithDirectory(action.projectConfig.Path)
+			dataStore := environment.NewLocalFileDataStore(azdCtx, config.NewFileConfigManager(config.NewManager()))
+			envManager, err := environment.NewManager(
+				mockContext.Container, azdCtx, console, dataStore, nil,
+			)
+			require.NoError(t, err)
+			require.NoError(t, envManager.Save(t.Context(), action.env))
+			action.envManager = envManager
+
+			destroyResult := &provisioning.DestroyResult{SkippedDeletion: test.skipped}
+			if !test.skipped {
+				destroyResult.InvalidatedEnvKeys = []string{"LOCAL_OUTPUT"}
+			}
+			var provider *inputAliasDownProvider
+			mockContext.Container.MustRegisterNamedTransient(string(provisioning.Test), func(
+				env *environment.Environment, manager environment.Manager,
+			) provisioning.Provider {
+				provider = &inputAliasDownProvider{
+					inputAliasRefreshProvider: &inputAliasRefreshProvider{
+						mockRefreshProvider: &mockRefreshProvider{}, env: env, envManager: manager,
+					},
+					destroyResult: destroyResult,
+				}
+				return provider
+			})
+			action.provisionManager = provisioning.NewManager(
+				mockContext.Container, nil, envManager, action.env, console,
+				action.alphaFeatureManager, nil, cloud.AzurePublic(),
+			)
+
+			result, err := action.Run(t.Context())
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.NotNil(t, provider)
+			require.NotSame(t, action.env, provider.env)
+			require.Equal(t, "input-value", provider.initializedInput)
+			require.Equal(t, "input-value", provider.destroyedInput)
+			if test.skipped {
+				require.Nil(t, result.Message)
+				require.Equal(t, "output-value", action.env.Getenv("SHARED_OUTPUT"))
+			} else {
+				require.Contains(t, result.Message.Header, "Your application was removed")
+				require.NotContains(t, action.env.Dotenv(), "SHARED_OUTPUT")
+			}
+			require.Equal(t, "input-value", action.env.Getenv("SHARED_INPUT"))
+			require.Equal(t, "unchanged-value", action.env.Getenv("UNRELATED_OUTPUT"))
+			require.NotContains(t, action.env.Dotenv(), "LOCAL_INPUT")
+			require.NotContains(t, action.env.Dotenv(), "LOCAL_OUTPUT")
+
+			persisted, err := dataStore.Get(t.Context(), action.env.Name())
+			require.NoError(t, err)
+			require.Equal(t, action.env.Dotenv(), persisted.Dotenv())
+			contents, err := os.ReadFile(dataStore.EnvPath(action.env))
+			require.NoError(t, err)
+			require.NotContains(t, string(contents), "LOCAL_INPUT=")
+			require.NotContains(t, string(contents), "LOCAL_OUTPUT=")
+		})
+	}
 }
