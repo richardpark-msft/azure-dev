@@ -41,6 +41,8 @@
             "description": "Optional. Provides additional configuration for Azure infrastructure provisioning.",
             "additionalProperties": true,
             "properties": {
+                "env": false,
+                "outputs": false,
                 "provider": {
                     "type": "string",
                     "title": "Type of infrastructure provisioning provider",
@@ -75,6 +77,30 @@
                             "name",
                             "path"
                         ],
+                        "allOf": [
+                            {
+                                "if": {
+                                    "required": [
+                                        "env"
+                                    ],
+                                    "properties": {
+                                        "env": {
+                                            "minProperties": 1
+                                        }
+                                    }
+                                },
+                                "then": {
+                                    "properties": {
+                                        "provider": {
+                                            "enum": [
+                                                "bicep",
+                                                "terraform"
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        ],
                         "properties": {
                             "name": {
                                 "type": "string",
@@ -108,17 +134,11 @@
                                 "description": "Optional. Configuration passed to the infrastructure provisioning provider.",
                                 "additionalProperties": true
                             },
-                            "aliases": {
-                                "type": "object",
-                                "title": "Layer variable aliases",
-                                "description": "Optional. Maps provider-view variable names to project-view names for reads, writes, and deletes, including parameter inputs and deployment outputs. Keys are provider variables; values are project variables. Project-variable destinations must be unique within this infrastructure entry.",
-                                "propertyNames": {
-                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
-                                },
-                                "additionalProperties": {
-                                    "type": "string",
-                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
-                                }
+                            "env": {
+                                "$ref": "#/definitions/layerEnvironment"
+                            },
+                            "outputs": {
+                                "$ref": "#/definitions/layerOutputs"
                             },
                             "dependsOn": {
                                 "type": "array",
@@ -1299,6 +1319,35 @@
         }
     },
     "definitions": {
+        "layerVariableName": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "not": {
+                "pattern": "^(?:[Aa][Zz][Dd]_|[Aa][Zz][Uu][Rr][Ee]_(?:[Ee][Nn][Vv]_[Nn][Aa][Mm][Ee]|[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]_[Ii][Dd]|[Tt][Ee][Nn][Aa][Nn][Tt]_[Ii][Dd]|[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]|[Rr][Ee][Ss][Oo][Uu][Rr][Cc][Ee]_[Gg][Rr][Oo][Uu][Pp]|[Pp][Rr][Ii][Nn][Cc][Ii][Pp][Aa][Ll]_(?:[Ii][Dd]|[Tt][Yy][Pp][Ee]))$)"
+            }
+        },
+        "layerEnvironment": {
+            "type": "object",
+            "title": "Provider-local input environment",
+            "description": "Optional. Bicep and Terraform only. Keys are provider-local variable names; values are literal strings or environment-substitution expressions evaluated once at provider initialization against project values with process-environment fallback. Entries do not expand against one another. Missing references expand to empty; defaults are supported. Writes and deletes of these keys stay local to the provider instance. Keys must be unique case-insensitively and cannot use reserved azd execution-context names; expression sources may read reserved names.",
+            "propertyNames": {
+                "$ref": "#/definitions/layerVariableName"
+            },
+            "additionalProperties": {
+                "type": "string"
+            }
+        },
+        "layerOutputs": {
+            "type": "object",
+            "title": "Infrastructure output names",
+            "description": "Optional. Maps provider output names to project environment variable names for all provisioning providers, including custom providers. Applies once to returned outputs, planned output metadata, lifecycle events, and destroy-time invalidation; unmapped outputs keep their names. Keys and destinations must each be unique case-insensitively and cannot use reserved azd execution-context names.",
+            "propertyNames": {
+                "$ref": "#/definitions/layerVariableName"
+            },
+            "additionalProperties": {
+                "$ref": "#/definitions/layerVariableName"
+            }
+        },
         "hooks": {
             "anyOf": [
                 {

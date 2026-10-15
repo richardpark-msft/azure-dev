@@ -5,7 +5,6 @@ package provisioning
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -16,7 +15,9 @@ import (
 	"dario.cat/mergo"
 	"github.com/azure/azure-dev/cli/azd/internal/tracing"
 	"github.com/azure/azure-dev/cli/azd/internal/tracing/fields"
+	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/ext"
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 )
 
 type ProviderKind string
@@ -64,10 +65,12 @@ type Options struct {
 	DeploymentStacks *DeploymentStacksConfig `yaml:"deploymentStacks,omitempty"`
 	// Config holds provider-specific configuration options
 	Config map[string]any `yaml:"config,omitempty"`
-	// Aliases maps provider-view variable names to project-view names.
-	// Output aliases apply to all providers. Input aliases apply to built-in providers.
-	// Project-view names must be unique within each infrastructure entry.
-	Aliases map[string]string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+	// Env supplies provider-local input values, expanded once against the project environment.
+	// Only built-in providers support env. Execution-context and control variables cannot be overridden.
+	Env osutil.ExpandableMap `yaml:"env,omitempty"`
+	// Outputs maps returned provider output names to project variable names for all providers.
+	// Execution-context and control variables cannot appear on either side.
+	Outputs map[string]string `yaml:"outputs,omitempty" json:"outputs,omitempty"`
 	// DependsOn lists the names of other infrastructure entries this entry must wait for
 	// before being provisioned. Use this to declare hook-mediated edges
 	// (for example, when a postprovision hook in another entry writes an
@@ -89,7 +92,7 @@ type Options struct {
 	//
 	// This is used when planning multiple layers, and would be set to plan-time outputs
 	// from previous layers.
-	// Callers supply project-view variable names; Manager.Initialize maps them to provider-view names.
+	// Callers supply project-view variable names; Manager.Initialize marks dependent env inputs as virtual.
 	VirtualEnv map[string]string `yaml:"-"`
 }
 
@@ -129,28 +132,49 @@ func (o Options) AbsolutePath(projectPath string) string {
 	return filepath.Join(projectPath, o.Path)
 }
 
-// ApplyOutputAliases maps output names in the provider view to variable names in the project view.
-func ApplyOutputAliases(
+// EnvReferences returns the project variables read by a provider input's expression.
+// Inputs without an explicit env entry read their own project variable name.
+func (o Options) EnvReferences(name string) ([]string, error) {
+	expression, overridden := o.Env[name]
+	if !overridden {
+		return []string{name}, nil
+	}
+
+	references := map[string]struct{}{}
+	if _, err := expression.Envsubst(func(key string) string {
+		references[key] = struct{}{}
+		return ""
+	}); err != nil {
+		return nil, fmt.Errorf("parsing env input %q: %w", name, err)
+	}
+
+	return slices.Sorted(maps.Keys(references)), nil
+}
+
+// ApplyOutputMappings maps returned provider output names to project variable names.
+func ApplyOutputMappings(
 	outputs map[string]OutputParameter,
-	aliases map[string]string,
+	mappings map[string]string,
 ) (map[string]OutputParameter, error) {
 	sharedOutputs := make(map[string]OutputParameter, len(outputs))
 	sources := make(map[string]string, len(outputs))
 
 	for _, localName := range slices.Sorted(maps.Keys(outputs)) {
 		sharedName := localName
-		if alias, has := aliases[localName]; has {
-			sharedName = alias
+		if destination, has := mappings[localName]; has {
+			sharedName = destination
 		}
 
-		if previous, has := sources[sharedName]; has && previous != localName {
+		collisionKey := strings.ToUpper(sharedName)
+		if previous, has := sources[collisionKey]; has && previous != localName {
 			return nil, fmt.Errorf(
-				"provider outputs %q and %q both target project variable %q",
+				"provider outputs %q and %q both target project variable %q "+
+					"(environment variable names differ only by case, which would break on Windows)",
 				previous, localName, sharedName,
 			)
 		}
 
-		sources[sharedName] = localName
+		sources[collisionKey] = localName
 		sharedOutputs[sharedName] = outputs[localName]
 	}
 
@@ -210,14 +234,13 @@ func (o *Options) validate(allowPathlessExtensionProviders bool) error {
 	if len(o.Hooks) > 0 {
 		return validateErr("infra", "'hooks' can only be declared under 'infra.layers[]'")
 	}
-	if len(o.Aliases) > 0 {
-		return validateErr("infra", "'aliases' can only be declared under 'infra.layers[]'")
+	if len(o.Env) > 0 || len(o.Outputs) > 0 {
+		return validateErr("infra", "'env' and 'outputs' can only be declared on infrastructure entries")
 	}
 
 	if len(o.Layers) > 0 {
 		anyIncompatibleFieldsSet := func() bool {
-			return o.Name != "" || o.Module != "" || o.Path != "" || o.DeploymentStacks != nil ||
-				len(o.Aliases) > 0
+			return o.Name != "" || o.Module != "" || o.Path != "" || o.DeploymentStacks != nil
 		}
 
 		if anyIncompatibleFieldsSet() {
@@ -279,7 +302,7 @@ func (o *Options) validateLayers(allowPathlessExtensionProviders bool) error {
 		if err := validateHooks(layer.Name, layer.Hooks); err != nil {
 			return err
 		}
-		if err := validateLayerAliases(layer); err != nil {
+		if err := validateLayerVariables(layer); err != nil {
 			return fmt.Errorf("%s: %w", layer.Name, err)
 		}
 	}
@@ -287,22 +310,88 @@ func (o *Options) validateLayers(allowPathlessExtensionProviders bool) error {
 	return nil
 }
 
-var aliasNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var variableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-func validateLayerAliases(layer Options) error {
-	destinations := make(map[string]string, len(layer.Aliases))
-	for _, localName := range slices.Sorted(maps.Keys(layer.Aliases)) {
-		sharedName := layer.Aliases[localName]
-		if localName == "" || sharedName == "" {
-			return errors.New("alias names cannot be empty in the provider view or project view")
+var reservedVariables = map[string]struct{}{
+	environment.EnvNameEnvVarName:        {},
+	environment.LocationEnvVarName:       {},
+	environment.PrincipalIdEnvVarName:    {},
+	environment.PrincipalTypeEnvVarName:  {},
+	environment.ResourceGroupEnvVarName:  {},
+	environment.SubscriptionIdEnvVarName: {},
+	environment.TenantIdEnvVarName:       {},
+}
+
+func supportsEnvInputs(provider ProviderKind) bool {
+	return provider == NotSpecified || slices.Contains(builtInProviderKinds, provider)
+}
+
+func validateVariableName(name string, context string) error {
+	if !variableNamePattern.MatchString(name) {
+		return fmt.Errorf("%s variable %q must match %s", context, name, variableNamePattern)
+	}
+	normalized := strings.ToUpper(name)
+	_, reserved := reservedVariables[normalized]
+	if reserved || strings.HasPrefix(normalized, "AZD_") {
+		return fmt.Errorf(
+			"%s variable %q is reserved by azd and cannot be scoped to an infrastructure layer",
+			context, name,
+		)
+	}
+
+	return nil
+}
+
+func validateLayerVariables(layer Options) error {
+	if len(layer.Env) > 0 && !supportsEnvInputs(layer.Provider) {
+		return fmt.Errorf(
+			"env inputs are only supported for the built-in %q and %q providers; provider %q is not supported",
+			Bicep, Terraform, layer.Provider,
+		)
+	}
+
+	inputNames := make(map[string]string, len(layer.Env))
+	for _, name := range slices.Sorted(maps.Keys(layer.Env)) {
+		if err := validateVariableName(name, "env input"); err != nil {
+			return err
 		}
-		if !aliasNamePattern.MatchString(localName) || !aliasNamePattern.MatchString(sharedName) {
-			return fmt.Errorf("alias %q to %q must use names matching %s", localName, sharedName, aliasNamePattern)
+		key := strings.ToUpper(name)
+		if previous, has := inputNames[key]; has {
+			return fmt.Errorf("env input names %q and %q differ only by case", previous, name)
 		}
-		if previous, has := destinations[sharedName]; has {
-			return fmt.Errorf("aliases %q and %q cannot both target %q", previous, localName, sharedName)
+		inputNames[key] = name
+		if _, err := layer.EnvReferences(name); err != nil {
+			return err
 		}
-		destinations[sharedName] = localName
+	}
+
+	destinations := make(map[string]string, len(layer.Outputs))
+	providerNames := make(map[string]string, len(layer.Outputs))
+	for _, localName := range slices.Sorted(maps.Keys(layer.Outputs)) {
+		sharedName := layer.Outputs[localName]
+		if err := validateVariableName(localName, "provider output"); err != nil {
+			return err
+		}
+		if err := validateVariableName(sharedName, "project output"); err != nil {
+			return err
+		}
+		providerKey := strings.ToUpper(localName)
+		if previous, has := providerNames[providerKey]; has {
+			return fmt.Errorf(
+				"output names %q and %q differ only by case",
+				previous, localName,
+			)
+		}
+		providerNames[providerKey] = localName
+
+		destinationKey := strings.ToUpper(sharedName)
+		if previous, has := destinations[destinationKey]; has {
+			return fmt.Errorf(
+				"outputs %q and %q cannot both target project variable %q",
+				previous, localName, sharedName,
+			)
+		}
+		destinations[destinationKey] = localName
 	}
 
 	return nil

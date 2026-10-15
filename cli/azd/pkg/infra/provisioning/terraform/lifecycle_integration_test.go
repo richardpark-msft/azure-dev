@@ -39,6 +39,7 @@ func TestTerraformLifecycle_MapsLayerInputsOutputsAndTeardown(t *testing.T) {
 	t.Setenv("AZURE_DEV_COLLECT_TELEMETRY", "no")
 	t.Setenv("AZD_FORCE_TTY", "false")
 	t.Setenv("NO_COLOR", "1")
+	t.Setenv("MISSING_INPUT", "")
 
 	projectDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "azure.yaml"), []byte(`
@@ -49,15 +50,17 @@ infra:
       provider: terraform
       path: infra/app
       module: main
-      aliases:
-        LAYER_VALUE: APP_INPUT
+      env:
+        LAYER_VALUE: prefix-${APP_INPUT}-${MISSING_INPUT:-fallback}
+      outputs:
         OUTPUT: APP_OUTPUT
     - name: data
       provider: terraform
       path: infra/data
       module: main
-      aliases:
-        LAYER_VALUE: DATA_INPUT
+      env:
+        LAYER_VALUE: ${DATA_INPUT}
+      outputs:
         OUTPUT: DATA_OUTPUT
 `), 0o600))
 
@@ -80,6 +83,7 @@ infra:
 	require.NoError(t, err)
 	layers := projectConfig.Infra.GetLayers()
 	require.Len(t, layers, 2)
+	expectedInputs := map[string]string{"app": "prefix-app-fallback", "data": "data"}
 
 	backing := environment.NewWithValues("test-env", map[string]string{
 		environment.SubscriptionIdEnvVarName: "test-subscription",
@@ -106,21 +110,18 @@ infra:
 	layerLifecycles := make([]layerLifecycle, 0, len(layers))
 	for _, layer := range layers {
 		outputKey := strings.ToUpper(layer.Name) + "_OUTPUT"
-		scoped := environment.NewMappedScopedEnvironment(
-			backing,
-			layer.Aliases,
-		)
-
-		manager := newTerraformLifecycleManager(t, projectDir, layer, scoped, envManager, commands)
-		_, err := manager.Deploy(t.Context())
+		manager := newTerraformLifecycleManager(t, projectDir, layer, backing, envManager, commands)
+		result, err := manager.Deploy(t.Context())
 		require.NoError(t, err)
+		require.Equal(t, layer.Name+"-output", result.Deployment.Outputs["OUTPUT"].Value)
+		require.NotContains(t, result.Deployment.Outputs, outputKey)
 
 		parametersPath := filepath.Join(projectDir, ".azure", backing.Name(), layer.Path, "main.tfvars.json")
 		parametersBytes, err := os.ReadFile(parametersPath)
 		require.NoError(t, err)
 		var parameters map[string]string
 		require.NoError(t, json.Unmarshal(parametersBytes, &parameters))
-		require.Equal(t, map[string]string{"layerValue": layer.Name}, parameters)
+		require.Equal(t, map[string]string{"layerValue": expectedInputs[layer.Name]}, parameters)
 
 		layerLifecycles = append(layerLifecycles, layerLifecycle{
 			options:     layer,
@@ -133,6 +134,9 @@ infra:
 	require.Equal(t, "shared-output", backing.Getenv("OUTPUT"))
 	require.Equal(t, "app-output", backing.Getenv("APP_OUTPUT"))
 	require.Equal(t, "data-output", backing.Getenv("DATA_OUTPUT"))
+	require.NotContains(t, backing.Dotenv(), "LAYER_VALUE")
+	require.Equal(t, "app", backing.Getenv("APP_INPUT"))
+	require.Equal(t, "data", backing.Getenv("DATA_INPUT"))
 
 	slices.Reverse(layerLifecycles)
 	for index, layer := range layerLifecycles {
@@ -216,19 +220,18 @@ func newTerraformLifecycleManager(
 		return exec.RunResult{Stdout: "Destroy complete! Resources: 1 destroyed."}, nil
 	})
 
-	provider := NewTerraformProvider(
-		terraformTools.NewCli(mockContext.CommandRunner),
-		envManager,
-		env,
-		mockContext.Console,
-		&mockCurrentPrincipal{},
-		nil,
-	)
-	ioc.RegisterNamedInstance[provisioning.Provider](
-		mockContext.Container,
-		string(provisioning.Terraform),
-		provider,
-	)
+	ioc.RegisterInstance[environment.ScopedEnvironment](mockContext.Container, env)
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Terraform),
+		func(providerEnv environment.ScopedEnvironment) provisioning.Provider {
+			return NewTerraformProvider(
+				terraformTools.NewCli(mockContext.CommandRunner),
+				envManager,
+				providerEnv,
+				mockContext.Console,
+				&mockCurrentPrincipal{},
+				nil,
+			)
+		})
 
 	manager := provisioning.NewManager(
 		mockContext.Container,
@@ -236,7 +239,7 @@ func newTerraformLifecycleManager(
 			return provisioning.Terraform, nil
 		},
 		envManager,
-		env,
+		env.BackingEnv(),
 		mockContext.Console,
 		alpha.NewFeaturesManagerWithConfig(mockContext.Config),
 		nil,

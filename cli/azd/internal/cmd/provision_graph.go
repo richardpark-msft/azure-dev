@@ -185,11 +185,11 @@ func (p *ProvisionAction) provisionLayersGraph(
 						return svcErr
 					}
 
-					projectOutputs, err := provisioning.ApplyOutputAliases(
-						deployResult.Deployment.Outputs, layer.Aliases,
+					projectOutputs, err := provisioning.ApplyOutputMappings(
+						deployResult.Deployment.Outputs, layer.Outputs,
 					)
 					if err != nil {
-						return fmt.Errorf("applying output aliases for layer %s: %w", layer.Name, err)
+						return fmt.Errorf("mapping outputs for layer %s: %w", layer.Name, err)
 					}
 
 					for _, svc := range servicesStable {
@@ -983,7 +983,7 @@ func runProvisionSingleLayer(
 	if deployResult.SkippedReason == provisioning.DeploymentStateSkipped {
 		if deployResult.Deployment != nil && len(deployResult.Deployment.Outputs) > 0 {
 			if err := mergeLayerOutputsLocked(
-				ctx, deps, envMu, stepName, deployResult.Deployment.Outputs, layer.Aliases,
+				ctx, deps, envMu, stepName, deployResult.Deployment.Outputs, layer.Outputs,
 			); err != nil {
 				return deployResult, fmt.Errorf(
 					"updating environment for skipped layer %s: %w", stepName, err,
@@ -994,7 +994,7 @@ func runProvisionSingleLayer(
 		// can react to cached outputs.
 	} else {
 		if err := mergeLayerOutputsLocked(
-			ctx, deps, envMu, stepName, deployResult.Deployment.Outputs, layer.Aliases,
+			ctx, deps, envMu, stepName, deployResult.Deployment.Outputs, layer.Outputs,
 		); err != nil {
 			return deployResult, fmt.Errorf(
 				"updating environment for layer %s: %w", stepName, err,
@@ -1007,11 +1007,11 @@ func runProvisionSingleLayer(
 	// to update appsettings with provisioning outputs.
 	if deps.importManager != nil && deployResult.Deployment != nil &&
 		len(deployResult.Deployment.Outputs) > 0 {
-		projectOutputs, err := provisioning.ApplyOutputAliases(
-			deployResult.Deployment.Outputs, layer.Aliases,
+		projectOutputs, err := provisioning.ApplyOutputMappings(
+			deployResult.Deployment.Outputs, layer.Outputs,
 		)
 		if err != nil {
-			return deployResult, fmt.Errorf("applying output aliases for layer %s: %w", stepName, err)
+			return deployResult, fmt.Errorf("mapping outputs for layer %s: %w", stepName, err)
 		}
 
 		servicesStable, svcErr := deps.importManager.ServiceStable(ctx, deps.projectConfig)
@@ -1109,7 +1109,7 @@ func mergeLayerOutputsLocked(
 	envMu *sync.Mutex,
 	stepName string,
 	outputs map[string]provisioning.OutputParameter,
-	aliases map[string]string,
+	outputMappings map[string]string,
 ) error {
 	envMu.Lock()
 	defer envMu.Unlock()
@@ -1118,9 +1118,9 @@ func mergeLayerOutputsLocked(
 		return fmt.Errorf("reloading shared env: %w", err)
 	}
 
-	sharedOutputs, err := provisioning.ApplyOutputAliases(outputs, aliases)
+	sharedOutputs, err := provisioning.ApplyOutputMappings(outputs, outputMappings)
 	if err != nil {
-		return fmt.Errorf("applying output aliases for layer %s: %w", stepName, err)
+		return fmt.Errorf("mapping outputs for layer %s: %w", stepName, err)
 	}
 
 	currentEnv := deps.env.Dotenv()

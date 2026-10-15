@@ -158,22 +158,35 @@ endpoint URL.
 
 General consumers use `*environment.Environment`, including command actions, project
 services, extension RPC services, and the lazy environment loader.
-Provisioning providers and their environment-dependent helpers (principal lookup,
-subscription/location setup, and resource-group prompts) use `environment.ScopedEnvironment`.
-The default IoC registration exposes the same concrete environment through this
-interface. A provisioning scope can replace the interface without changing the
-shared environment used by other consumers.
+Provisioning providers use `environment.ScopedEnvironment` for component inputs.
+Principal lookup, subscription/location setup, and resource-group prompts
+use the concrete environment because azd execution context is shared across all
+infrastructure entries. The default IoC registration exposes the same concrete
+environment through the scoped interface. A provisioning overlay can replace that
+interface without changing the shared environment used by other consumers.
 
 Scoped consumers access configuration through `env.GetConfig()`. Storage APIs still
 accept `*environment.Environment`; use `env.BackingEnv()` at save/reload boundaries.
-Do not use `BackingEnv()` to bypass scoped variable or configuration access.
-Provisioning output writes and destroy-time invalidation use the scoped environment
-so layer mappings are applied symmetrically, then save the backing environment.
+Do not use `BackingEnv()` to bypass component-variable or configuration access.
+The provisioning manager and `UpdateEnvironment` keep using `*environment.Environment`.
+The manager translates returned output names and
+destroy-time invalidated keys through `outputs` once before persistence in the shared
+project environment. Output mappings do not change environment reads or hook environments.
+Output-only mappings do not require a provider input overlay.
+
+Post-deploy operations use a separate temporary view over the manager's environment.
+It includes the provider's current local input values, preserves locally deleted
+inputs, and overlays raw returned outputs without publishing those names.
+The provider's input view is unchanged. Output serialization is shared with
+`UpdateEnvironment` so simple and structured results have the same representation.
 
 `Dotenv()` and `Environ()` expose the dotenv view, not inherited process-environment values.
 For child processes, use `env.ProcessEnviron(os.Environ())` to build the complete
-environment. Aliases resolve against that snapshot: missing project variables remove
-their provider names, while explicitly empty values remain present. Pass the result
+environment. The `env` overlay evaluates all expressions once during provider
+initialization against the same shared project values with process fallback, not
+against other local entries. Missing or empty references expand to empty unless a
+default is supplied. Explicitly empty project values override process fallback;
+explicitly empty local values also remain present. Pass the result
 through `exec.RunArgs.WithExactEnv` so the runner does not restore excluded inherited
 variables. Bicep parameter compilation uses this path.
 
@@ -184,15 +197,23 @@ Being able to accept the interface is not a reason to migrate a consumer.
 Prove the boundary with different values in the scoped view and backing environment:
 
 - Bicep parameter substitution and Terraform parameter files must use the scoped value.
-- Provider principal lookup and resource-group prompts must use the scoped subscription.
+- Environment name, subscription, tenant, location, resource group, principal identity,
+  and `AZD_*` controls must use the shared concrete environment. They cannot be local
+  `env` keys or appear on either side of `outputs`; `env` expressions may read them.
+- Provider principal lookup and resource-group prompts must use the shared deployment context.
 - Replacing the interface in a child scope must not change the concrete environment or its lazy loader.
 - Framework services, service targets, and hooks use the concrete environment supplied by their caller.
-  Provisioning output persistence uses the scoped environment and saves its backing environment.
-- Provider scopes map the registered, real-backed scoped environment and retain the real environment
-  manager. Providers read live inputs and persist their own config and dotenv changes, as on `upstream/main`.
-  Alias keys name variables in the provider view; alias values name variables in the project view.
-  The per-layer provisioning manager separately maps its cloned environment and uses the no-op-save
-  manager to stage deployment outputs. The graph saves those outputs to the shared environment after merging.
+  Provisioning output persistence uses project output names and saves the backing environment.
+- Provider overlays retain the registered, real-backed environment, command-scoped helpers,
+  real environment manager, and caller's console. Only keys explicitly listed in `env` keep
+  writes and deletes local to that provider instance. Other dotenv and config changes keep
+  their existing persistence behavior. Expanded inputs are fixed at initialization; other
+  inputs continue to read the shared environment.
+  The per-layer provisioning manager uses its cloned environment and no-op-save manager
+  to stage deployment outputs. Output names are translated once through `outputs`, including
+  state, refresh, planned metadata, and lifecycle events. The graph saves those outputs
+  to the shared environment after merging.
+- Only Bicep and Terraform support nonempty local `env` maps. All providers support `outputs`.
 - External provider registration must succeed without loading an environment. A later operation must pick up
   an environment that becomes available after registration.
 

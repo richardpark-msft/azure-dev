@@ -11,8 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/environment"
 	"github.com/azure/azure-dev/cli/azd/pkg/ext"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/braydonk/yaml"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
@@ -47,8 +49,9 @@ layers:
       - name: app-infra
         path: ./infra/app
         provider: bicep
-        aliases:
-          LOCAL_INPUT: SHARED_INPUT
+        env:
+          LOCAL_INPUT: ${SHARED_INPUT}
+        outputs:
           LOCAL_OUTPUT: SHARED_OUTPUT
     services:
       api:
@@ -63,38 +66,127 @@ layers:
 	require.Len(t, projectConfig.Layers[0].Infra, 1)
 	assert.Equal(t, "app-infra", projectConfig.Layers[0].Infra[0].Name)
 	assert.Equal(t, provisioning.Bicep, projectConfig.Layers[0].Infra[0].Provider)
+	assert.Equal(t, "${SHARED_INPUT}", projectConfig.Layers[0].Infra[0].Env["LOCAL_INPUT"].Raw())
+	assert.Equal(t, "SHARED_OUTPUT", projectConfig.Layers[0].Infra[0].Outputs["LOCAL_OUTPUT"])
 	require.Contains(t, projectConfig.Layers[0].Services, "api")
 	assert.Equal(t, "api", projectConfig.Layers[0].Services["api"].Name)
 	assert.Equal(t, "application", projectConfig.Layers[0].Infra[0].Layer)
 }
 
-func TestParseRejectsAliasesSharingProjectVariable(t *testing.T) {
+func layerVariableProject(format string, infra provisioning.Options) ProjectConfig {
+	project := ProjectConfig{Name: "test-project"}
+	if format == "infra" {
+		project.Infra.Layers = []provisioning.Options{infra}
+	} else {
+		project.Layers = LayerConfigs{{Name: "application", Infra: []provisioning.Options{infra}}}
+	}
+	return project
+}
+
+func TestParseLayerEnv(t *testing.T) {
 	t.Parallel()
 
-	for _, format := range []string{"infra", "project"} {
-		t.Run(format, func(t *testing.T) {
-			t.Parallel()
+	tests := []struct {
+		name    string
+		env     map[string]string
+		invalid bool
+	}{
+		{
+			name: "same source variable",
+			env:  map[string]string{"FIRST": "${SHARED}", "SECOND": "${SHARED}"},
+		},
+		{
+			name: "literals and expressions",
+			env: map[string]string{
+				"LITERAL": "value with spaces", "EMPTY": "", "URL": "https://${HOST}/api",
+				"DEFAULT": "${OPTIONAL:-fallback}", "MISSING": "${UNSET}",
+			},
+		},
+		{
+			name: "entries retain independent expressions",
+			env:  map[string]string{"FIRST": "${SECOND}", "SECOND": "${THIRD}"},
+		},
+		{
+			name:    "provider names differ only by case",
+			env:     map[string]string{"PROVIDER": "${FIRST}", "provider": "${SECOND}"},
+			invalid: true,
+		},
+	}
 
-			infra := provisioning.Options{
-				Name: "producer", Provider: provisioning.Bicep, Path: "infra/producer",
-				Aliases: map[string]string{"FIRST": "SHARED", "SECOND": "SHARED"},
-			}
-			project := ProjectConfig{Name: "test-project"}
-			if format == "infra" {
-				project.Infra.Layers = []provisioning.Options{infra}
-			} else {
-				project.Layers = LayerConfigs{{Name: "application", Infra: []provisioning.Options{infra}}}
-			}
-			content, err := yaml.Marshal(project)
-			require.NoError(t, err)
+	for _, tt := range tests {
+		for _, format := range []string{"infra", "project"} {
+			t.Run(tt.name+"/"+format, func(t *testing.T) {
+				t.Parallel()
+				env := osutil.ExpandableMap{}
+				for key, value := range tt.env {
+					env[key] = osutil.NewExpandableString(value)
+				}
+				infra := provisioning.Options{
+					Name: "producer", Provider: provisioning.Bicep, Path: "infra/producer",
+					Env: env,
+				}
+				content, err := yaml.Marshal(layerVariableProject(format, infra))
+				require.NoError(t, err)
 
-			_, err = Parse(t.Context(), string(content))
-			require.ErrorContains(t, err, `aliases "FIRST" and "SECOND" cannot both target "SHARED"`)
-		})
+				project, err := Parse(t.Context(), string(content))
+				if tt.invalid {
+					require.ErrorContains(t, err, "env input names")
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, tt.env, project.InfrastructureConfigs()[0].Env.Raw())
+				}
+			})
+		}
 	}
 }
 
-func TestParseLayerAliasNames(t *testing.T) {
+func TestParseLayerOutputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		outputs map[string]string
+		invalid bool
+	}{
+		{name: "independent outputs", outputs: map[string]string{"FIRST": "PROJECT_FIRST", "SECOND": "PROJECT_SECOND"}},
+		{name: "mapping applies once", outputs: map[string]string{"FIRST": "SECOND", "SECOND": "THIRD"}},
+		{
+			name:    "same destination",
+			outputs: map[string]string{"FIRST": "SHARED", "SECOND": "SHARED"}, invalid: true,
+		},
+		{
+			name:    "destinations differ only by case",
+			outputs: map[string]string{"FIRST": "SHARED", "SECOND": "shared"}, invalid: true,
+		},
+		{
+			name:    "provider names differ only by case",
+			outputs: map[string]string{"PROVIDER": "FIRST", "provider": "SECOND"}, invalid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, format := range []string{"infra", "project"} {
+			t.Run(tt.name+"/"+format, func(t *testing.T) {
+				t.Parallel()
+				infra := provisioning.Options{
+					Name: "producer", Provider: provisioning.Bicep, Path: "infra/producer", Outputs: tt.outputs,
+				}
+				content, err := yaml.Marshal(layerVariableProject(format, infra))
+				require.NoError(t, err)
+
+				project, err := Parse(t.Context(), string(content))
+				if tt.invalid {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, tt.outputs, project.InfrastructureConfigs()[0].Outputs)
+				}
+			})
+		}
+	}
+}
+
+func TestParseLayerVariableNames(t *testing.T) {
 	t.Parallel()
 
 	names := []struct {
@@ -115,44 +207,134 @@ func TestParseLayerAliasNames(t *testing.T) {
 		{name: "caf\u00e9"},
 	}
 	for _, format := range []string{"infra", "project"} {
-		for _, view := range []string{"provider", "project"} {
+		for _, field := range []string{"env key", "output key", "output destination"} {
 			for _, tt := range names {
-				t.Run(fmt.Sprintf("%s/%s/%q", format, view, tt.name), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/%s/%q", format, field, tt.name), func(t *testing.T) {
 					t.Parallel()
 
-					providerName, projectName := "LOCAL_VARIABLE", "SHARED_VARIABLE"
-					if view == "provider" {
-						providerName = tt.name
-					} else {
-						projectName = tt.name
-					}
-					aliases := map[string]string{providerName: projectName}
 					infra := provisioning.Options{
 						Name: "producer", Provider: provisioning.Bicep, Path: "infra/producer",
-						Aliases: aliases,
 					}
-					project := ProjectConfig{Name: "test-project"}
-					if format == "infra" {
-						project.Infra.Layers = []provisioning.Options{infra}
-					} else {
-						project.Layers = LayerConfigs{{Name: "application", Infra: []provisioning.Options{infra}}}
+					switch field {
+					case "env key":
+						infra.Env = osutil.ExpandableMap{tt.name: osutil.NewExpandableString("${SHARED_VARIABLE}")}
+					case "output key":
+						infra.Outputs = map[string]string{tt.name: "PROJECT_VARIABLE"}
+					case "output destination":
+						infra.Outputs = map[string]string{"PROVIDER_VARIABLE": tt.name}
 					}
-					content, err := yaml.Marshal(project)
+					content, err := yaml.Marshal(layerVariableProject(format, infra))
 					require.NoError(t, err)
 
 					_, err = Parse(t.Context(), string(content))
 					if tt.valid {
 						require.NoError(t, err)
 					} else {
-						require.ErrorContains(t, err, "alias")
-						if tt.name == "" {
-							require.ErrorContains(t, err, "names cannot be empty")
-						} else {
-							require.ErrorContains(t, err, "must use names matching ^[A-Za-z_][A-Za-z0-9_]*$")
-						}
+						require.ErrorContains(t, err, "must match ^[A-Za-z_][A-Za-z0-9_]*$")
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestParseLayerReservedVariables(t *testing.T) {
+	t.Parallel()
+
+	names := []string{
+		environment.EnvNameEnvVarName,
+		environment.LocationEnvVarName,
+		environment.PrincipalIdEnvVarName,
+		environment.PrincipalTypeEnvVarName,
+		environment.ResourceGroupEnvVarName,
+		environment.SubscriptionIdEnvVarName,
+		environment.TenantIdEnvVarName,
+		"AZD_INTERNAL_CONTROL",
+		"azure_subscription_id",
+		"azd_internal_control",
+	}
+	for _, format := range []string{"infra", "project"} {
+		for _, field := range []string{"env key", "env source", "output key", "output destination"} {
+			for _, name := range names {
+				t.Run(fmt.Sprintf("%s/%s/%s", format, field, name), func(t *testing.T) {
+					t.Parallel()
+
+					infra := provisioning.Options{
+						Name: "producer", Provider: provisioning.Bicep, Path: "infra/producer",
+					}
+					switch field {
+					case "env key":
+						infra.Env = osutil.ExpandableMap{name: osutil.NewExpandableString("literal")}
+					case "env source":
+						infra.Env = osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${" + name + "}")}
+					case "output key":
+						infra.Outputs = map[string]string{name: "PROJECT_VARIABLE"}
+					case "output destination":
+						infra.Outputs = map[string]string{"PROVIDER_VARIABLE": name}
+					}
+					content, err := yaml.Marshal(layerVariableProject(format, infra))
+					require.NoError(t, err)
+
+					_, err = Parse(t.Context(), string(content))
+					if field == "env source" {
+						require.NoError(t, err)
+					} else {
+						require.ErrorContains(t, err, "reserved")
+						require.ErrorContains(t, err, name)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestParseLayerVariablesRejectsRootInfra(t *testing.T) {
+	t.Parallel()
+
+	for _, field := range []string{"env", "outputs"} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse(t.Context(), fmt.Sprintf(
+				"name: test-project\ninfra:\n  provider: bicep\n  %s:\n    LOCAL_VARIABLE: PROJECT_VARIABLE\n", field,
+			))
+			require.ErrorContains(t, err, field)
+		})
+	}
+}
+
+func TestParseLayerCustomProviderVariables(t *testing.T) {
+	t.Parallel()
+
+	for _, format := range []string{"infra", "project"} {
+		for _, test := range []struct {
+			name    string
+			env     map[string]any
+			invalid bool
+		}{
+			{name: "output only"},
+			{name: "empty env", env: map[string]any{}},
+			{name: "nonempty env", env: map[string]any{"LOCAL_INPUT": "${PROJECT_INPUT}"}, invalid: true},
+		} {
+			t.Run(format+"/"+test.name, func(t *testing.T) {
+				t.Parallel()
+				infra := map[string]any{
+					"name": "custom", "provider": "microsoft.foundry", "path": "infra/custom",
+					"outputs": map[string]any{"PROVIDER_OUTPUT": "PROJECT_OUTPUT"},
+				}
+				if test.env != nil {
+					infra["env"] = test.env
+				}
+				content, err := yaml.Marshal(layerVariableDocument(format, infra))
+				require.NoError(t, err)
+
+				parsed, err := Parse(t.Context(), string(content))
+				if test.invalid {
+					require.ErrorContains(t, err, "env inputs are only supported")
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, "PROJECT_OUTPUT", parsed.InfrastructureConfigs()[0].Outputs["PROVIDER_OUTPUT"])
+				}
+			})
 		}
 	}
 }
@@ -291,8 +473,11 @@ layers:
       - name: app-infra
         path: ./infra/app
         provider: bicep
-        aliases:
-          LOCAL_INPUT: SHARED_INPUT
+        env:
+          LOCAL_INPUT: ${SHARED_INPUT}
+          LITERAL_INPUT: fixed-value
+          EMPTY_INPUT: ""
+        outputs:
           LOCAL_OUTPUT: SHARED_OUTPUT
     services:
       api:
@@ -301,8 +486,8 @@ layers:
         language: js
 `)
 	require.NoError(t, err)
-	require.Equal(t, "SHARED_INPUT", projectConfig.Layers[0].Infra[0].Aliases["LOCAL_INPUT"])
-	require.Equal(t, "SHARED_OUTPUT", projectConfig.Layers[0].Infra[0].Aliases["LOCAL_OUTPUT"])
+	require.Equal(t, "${SHARED_INPUT}", projectConfig.Layers[0].Infra[0].Env["LOCAL_INPUT"].Raw())
+	require.Equal(t, "SHARED_OUTPUT", projectConfig.Layers[0].Infra[0].Outputs["LOCAL_OUTPUT"])
 
 	path := filepath.Join(t.TempDir(), "azure.yaml")
 	require.NoError(t, Save(t.Context(), projectConfig, path))
@@ -315,7 +500,9 @@ layers:
 	require.Contains(t, yaml, "- name: application")
 	require.Contains(t, yaml, "infra:")
 	require.Contains(t, yaml, "- provider: bicep")
-	require.Contains(t, yaml, "aliases:")
+	require.Contains(t, yaml, "env:")
+	require.Contains(t, yaml, "outputs:")
+	require.Contains(t, yaml, "${SHARED_INPUT}")
 	require.Contains(t, yaml, "services:")
 	require.Contains(t, yaml, "api:")
 	require.NotContains(t, yaml, "layer: application")
@@ -323,7 +510,8 @@ layers:
 
 	reloaded, err := Load(t.Context(), path)
 	require.NoError(t, err)
-	require.Equal(t, projectConfig.Layers[0].Infra[0].Aliases, reloaded.Layers[0].Infra[0].Aliases)
+	require.Equal(t, projectConfig.Layers[0].Infra[0].Env.Raw(), reloaded.Layers[0].Infra[0].Env.Raw())
+	require.Equal(t, projectConfig.Layers[0].Infra[0].Outputs, reloaded.Layers[0].Infra[0].Outputs)
 }
 
 func TestSaveProjectLayersPreservesEmptyLayers(t *testing.T) {
@@ -398,10 +586,20 @@ func TestSaveProjectLayersRejectsMixedFormatsBeforeWrite(t *testing.T) {
 	}
 }
 
-func TestProjectLayersAlphaSchema(t *testing.T) {
-	t.Parallel()
+func layerVariableDocument(format string, infra map[string]any) map[string]any {
+	document := map[string]any{"name": "test-project"}
+	if format == "infra" {
+		document["infra"] = map[string]any{"layers": []any{infra}}
+	} else {
+		document["layers"] = []any{map[string]any{"name": "application", "infra": []any{infra}}}
+	}
+	return document
+}
 
-	rawSchema, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "schemas", "alpha", "azure.yaml.json"))
+func loadLayerTestSchema(t *testing.T, version string) *jsonschema.Schema {
+	t.Helper()
+
+	rawSchema, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "schemas", version, "azure.yaml.json"))
 	require.NoError(t, err)
 	var schemaDocument map[string]any
 	require.NoError(t, json.Unmarshal(rawSchema, &schemaDocument))
@@ -427,6 +625,13 @@ func TestProjectLayersAlphaSchema(t *testing.T) {
 	}
 	schema, err := compiler.Compile(resourceURI)
 	require.NoError(t, err)
+	return schema
+}
+
+func TestProjectLayersAlphaSchema(t *testing.T) {
+	t.Parallel()
+
+	schema := loadLayerTestSchema(t, "alpha")
 
 	layer := map[string]any{
 		"name": "application",
@@ -464,6 +669,18 @@ func TestProjectLayersAlphaSchema(t *testing.T) {
 			"infra": []any{map[string]any{
 				"name":     "foundry",
 				"provider": "microsoft.foundry",
+				"outputs":  map[string]any{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
+			}},
+		}},
+	}))
+	require.Error(t, schema.Validate(map[string]any{
+		"name": "layered-project",
+		"layers": []any{map[string]any{
+			"name": "application",
+			"infra": []any{map[string]any{
+				"name":     "foundry",
+				"provider": "microsoft.foundry",
+				"env":      map[string]any{"LOCAL_INPUT": "${PROJECT_INPUT}"},
 			}},
 		}},
 	}))
@@ -492,6 +709,132 @@ func TestProjectLayersAlphaSchema(t *testing.T) {
 			incompatibleProperty: map[string]any{},
 		}
 		require.Error(t, schema.Validate(projectDocument), incompatibleProperty)
+	}
+}
+
+func TestLayerVariableSchemas(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider string
+		env      any
+		outputs  any
+		invalid  bool
+	}{
+		{
+			name: "env expressions", provider: "bicep",
+			env: map[string]any{
+				"LOCAL_INPUT": "${PROJECT_INPUT}", "URL": "https://${PROJECT_HOST}/api",
+				"DEFAULT": "${OPTIONAL:-fallback}", "CONTEXT": "${AZURE_LOCATION}",
+				"CONTROL": "${AZD_CONTROL}", "LITERAL": "literal value", "EMPTY": "",
+			},
+			outputs: map[string]any{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
+		},
+		{
+			name: "terraform expressions", provider: "terraform",
+			env: map[string]any{"FIRST": "${SHARED}", "SECOND": "${SHARED}"},
+		},
+		{
+			name:    "valid variable names",
+			env:     map[string]any{"_name0": "literal", "a": ""},
+			outputs: map[string]any{"_output0": "_project0", "b": "c"},
+		},
+		{
+			name: "custom output only", provider: "microsoft.foundry",
+			outputs: map[string]any{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
+		},
+		{
+			name: "custom empty env", provider: "microsoft.foundry", env: map[string]any{},
+			outputs: map[string]any{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
+		},
+		{
+			name: "custom nonempty env", provider: "microsoft.foundry",
+			env: map[string]any{"LOCAL_INPUT": "${PROJECT_INPUT}"}, invalid: true,
+		},
+		{
+			name: "custom literal env", provider: "microsoft.foundry",
+			env: map[string]any{"LOCAL_INPUT": "literal"}, invalid: true,
+		},
+		{
+			name: "custom explicit empty value", provider: "microsoft.foundry",
+			env: map[string]any{"LOCAL_INPUT": ""}, invalid: true,
+		},
+		{name: "env values must be strings", env: map[string]any{"LOCAL_INPUT": 42}, invalid: true},
+		{name: "outputs cannot be expressions", outputs: map[string]any{"LOCAL_OUTPUT": "${OUTPUT}"}, invalid: true},
+		{name: "output values must be strings", outputs: map[string]any{"LOCAL_OUTPUT": 42}, invalid: true},
+	}
+
+	for _, version := range []string{"v1.0", "alpha"} {
+		t.Run(version, func(t *testing.T) {
+			t.Parallel()
+			schema := loadLayerTestSchema(t, version)
+			formats := []string{"infra"}
+			if version == "alpha" {
+				formats = append(formats, "project")
+			}
+			for _, format := range formats {
+				for _, test := range tests {
+					t.Run(format+"/"+test.name, func(t *testing.T) {
+						t.Parallel()
+						provider := test.provider
+						if provider == "" {
+							provider = "bicep"
+						}
+						infra := map[string]any{
+							"name": "component", "provider": provider, "path": "infra/component",
+						}
+						if test.env != nil {
+							infra["env"] = test.env
+						}
+						if test.outputs != nil {
+							infra["outputs"] = test.outputs
+						}
+						err := schema.Validate(layerVariableDocument(format, infra))
+						if test.invalid {
+							require.Error(t, err)
+						} else {
+							require.NoError(t, err)
+						}
+					})
+				}
+				for _, field := range []string{"env key", "output key", "output destination"} {
+					for _, name := range []string{
+						"", "BAD-NAME", "1BAD", "NAME\n",
+						"AZURE_ENV_NAME", "AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID", "AZURE_LOCATION",
+						"AZURE_RESOURCE_GROUP", "AZURE_PRINCIPAL_ID", "AZURE_PRINCIPAL_TYPE",
+						"AZD_CONTROL", "azure_subscription_id", "azd_control",
+					} {
+						t.Run(fmt.Sprintf("%s/%s/%q", format, field, name), func(t *testing.T) {
+							t.Parallel()
+							infra := map[string]any{
+								"name": "component", "provider": "bicep", "path": "infra/component",
+							}
+							switch field {
+							case "env key":
+								infra["env"] = map[string]any{name: "literal"}
+							case "output key":
+								infra["outputs"] = map[string]any{name: "PROJECT_OUTPUT"}
+							case "output destination":
+								infra["outputs"] = map[string]any{"LOCAL_OUTPUT": name}
+							}
+							require.Error(t, schema.Validate(layerVariableDocument(format, infra)))
+						})
+					}
+				}
+			}
+			for _, field := range []string{"env", "outputs"} {
+				t.Run("root/"+field, func(t *testing.T) {
+					t.Parallel()
+					require.Error(t, schema.Validate(map[string]any{
+						"name": "test-project",
+						"infra": map[string]any{
+							"provider": "bicep", field: map[string]any{"LOCAL_VARIABLE": "PROJECT_VARIABLE"},
+						},
+					}))
+				})
+			}
+		})
 	}
 }
 
@@ -577,9 +920,15 @@ infra:
     - name: network
       path: infra/network
       module: network
+      outputs:
+        LOCAL_NETWORK_ID: PROJECT_NETWORK_ID
     - name: application
       provider: terraform
       path: infra/application
+      env:
+        LOCAL_NETWORK_ID: ${PROJECT_NETWORK_ID}
+        LITERAL_INPUT: fixed-value
+        EMPTY_INPUT: ""
 services:
   api:
     host: appservice
@@ -606,6 +955,8 @@ services:
 	require.Len(t, reloaded.Infra.Layers, 2)
 	require.Equal(t, "network", reloaded.Infra.Layers[0].Name)
 	require.Equal(t, provisioning.Terraform, reloaded.Infra.Layers[1].Provider)
+	require.Equal(t, projectConfig.Infra.Layers[0].Outputs, reloaded.Infra.Layers[0].Outputs)
+	require.Equal(t, projectConfig.Infra.Layers[1].Env.Raw(), reloaded.Infra.Layers[1].Env.Raw())
 	require.Contains(t, reloaded.Services, "api")
 
 	contents, err := os.ReadFile(projectFile)

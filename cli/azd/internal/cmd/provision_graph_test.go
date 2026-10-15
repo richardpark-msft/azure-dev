@@ -28,6 +28,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning/bicep"
 	provisioningtest "github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning/test"
 	"github.com/azure/azure-dev/cli/azd/pkg/ioc"
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/azure/azure-dev/cli/azd/pkg/output"
 	"github.com/azure/azure-dev/cli/azd/pkg/project"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools/dotnet"
@@ -58,7 +59,7 @@ func TestNoopSaveEnvManager(t *testing.T) {
 	inner.AssertCalled(t, "Reload", mock.Anything, env)
 }
 
-func TestProvisionServiceEnvUpdatedEventPreservesOutputsWithoutAliases(t *testing.T) {
+func TestProvisionServiceEnvUpdatedEventPreservesUnmappedOutputs(t *testing.T) {
 	t.Parallel()
 
 	for _, single := range []bool{true, false} {
@@ -78,7 +79,7 @@ func TestProvisionServiceEnvUpdatedEventPreservesOutputsWithoutAliases(t *testin
 	}
 }
 
-func TestProvisionServiceEnvUpdatedEventAppliesAliases(t *testing.T) {
+func TestProvisionServiceEnvUpdatedEventAppliesOutputMappings(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -94,10 +95,10 @@ func TestProvisionServiceEnvUpdatedEventAppliesAliases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Event consumers need the same names as the saved environment. These aliases overlap
+			// Event consumers need the same names as the saved environment. These mappings overlap
 			// to catch accidental remapping of an already-translated name.
-			aliases := map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT", "SHARED_OUTPUT": "OTHER_OUTPUT"}
-			eventOutputs, providerOutputs, dotenv, _ := runProvisionServiceEnvUpdatedEvent(t, tt.single, tt.skipped, aliases)
+			mappings := map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT", "SHARED_OUTPUT": "OTHER_OUTPUT"}
+			eventOutputs, providerOutputs, dotenv, _ := runProvisionServiceEnvUpdatedEvent(t, tt.single, tt.skipped, mappings)
 			expectedOutputs := map[string]provisioning.OutputParameter{
 				"SHARED_OUTPUT": providerOutputs["LOCAL_OUTPUT"],
 				"OTHER_OUTPUT":  providerOutputs["SHARED_OUTPUT"],
@@ -112,7 +113,7 @@ func TestProvisionServiceEnvUpdatedEventAppliesAliases(t *testing.T) {
 	}
 }
 
-func TestProvisionServiceEnvUpdatedEventWritesAliasedDotNetSecrets(t *testing.T) {
+func TestProvisionServiceEnvUpdatedEventWritesMappedDotNetSecrets(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -128,11 +129,11 @@ func TestProvisionServiceEnvUpdatedEventWritesAliasedDotNetSecrets(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			aliases := map[string]string{
+			mappings := map[string]string{
 				"LOCAL_OUTPUT":  "ConnectionStrings__Database",
 				"SHARED_OUTPUT": "OTHER_OUTPUT",
 			}
-			_, _, dotenv, secrets := runProvisionServiceEnvUpdatedEvent(t, tt.single, tt.skipped, aliases)
+			_, _, dotenv, secrets := runProvisionServiceEnvUpdatedEvent(t, tt.single, tt.skipped, mappings)
 
 			// .NET uses ":" for hierarchical secret keys, while the environment keeps "__".
 			require.Equal(t, map[string]string{
@@ -149,7 +150,7 @@ func runProvisionServiceEnvUpdatedEvent(
 	t *testing.T,
 	single bool,
 	skipped bool,
-	aliases map[string]string,
+	outputMappings map[string]string,
 ) (
 	eventOutputs, providerOutputs map[string]provisioning.OutputParameter,
 	dotenv, secrets map[string]string,
@@ -171,8 +172,9 @@ func runProvisionServiceEnvUpdatedEvent(
 	if skipped {
 		provider.deployResult.SkippedReason = provisioning.DeploymentStateSkipped
 	}
-	const customProvider = provisioning.ProviderKind("contoso.custom")
-	ioc.RegisterNamedInstance[provisioning.Provider](mockContext.Container, string(customProvider), provider)
+	ioc.RegisterNamedInstance[provisioning.Provider](
+		mockContext.Container, string(provisioning.Bicep), provider,
+	)
 
 	projectConfig := &project.ProjectConfig{
 		Name: "test-project", Path: t.TempDir(),
@@ -229,7 +231,7 @@ func runProvisionServiceEnvUpdatedEvent(
 		}))
 
 	deps.serviceLocator = mockContext.Container
-	deps.defaultProvider = func() (provisioning.ProviderKind, error) { return customProvider, nil }
+	deps.defaultProvider = func() (provisioning.ProviderKind, error) { return provisioning.Bicep, nil }
 	deps.alphaFeatureManager = mockContext.AlphaFeaturesManager
 	deps.cloud = cloud.AzurePublic()
 	deps.projectPath = projectConfig.Path
@@ -239,7 +241,7 @@ func runProvisionServiceEnvUpdatedEvent(
 	))
 	deps.hookMu = &sync.Mutex{}
 	layer := provisioning.Options{
-		Name: "producer", Provider: customProvider, Path: "infra", Aliases: aliases,
+		Name: "producer", Provider: provisioning.Bicep, Path: "infra", Outputs: outputMappings,
 	}
 
 	var jsonOutput bytes.Buffer
@@ -305,6 +307,7 @@ func TestLayerProviderInitialization_PersistsRealEnvironment(t *testing.T) {
 	t.Setenv(environment.SubscriptionIdEnvVarName, "initialization-subscription")
 	t.Setenv(environment.LocationEnvVarName, "eastus2")
 	t.Setenv("AZD_CONFIG_DIR", t.TempDir())
+	t.Setenv("UNSET_INPUT", "")
 
 	deps, _, envPath := newPropagationTestDeps(t)
 	deps.env.DotenvSet("SHARED_INPUT", "live-input")
@@ -312,13 +315,15 @@ func TestLayerProviderInitialization_PersistsRealEnvironment(t *testing.T) {
 	mockContext := mocks.NewMockContext(t.Context())
 	ioc.RegisterInstance[environment.ScopedEnvironment](mockContext.Container, deps.env)
 	ioc.RegisterInstance(mockContext.Container, deps.envManager)
+	var provider *savingParametersProvider
 	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Bicep),
 		func(env environment.ScopedEnvironment, manager environment.Manager) provisioning.Provider {
-			return &savingParametersProvider{
-				Provider:   provisioningtest.NewTestProvider(manager, env, mockContext.Console, nil),
+			provider = &savingParametersProvider{
+				Provider:   provisioningtest.NewTestProvider(manager, env.BackingEnv(), mockContext.Console, nil),
 				env:        env,
 				envManager: manager,
 			}
+			return provider
 		})
 
 	layerEnv := environment.NewWithValues(deps.env.Name(), deps.env.Dotenv())
@@ -331,8 +336,20 @@ func TestLayerProviderInitialization_PersistsRealEnvironment(t *testing.T) {
 	)
 	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
 		Provider: provisioning.Bicep,
-		Aliases:  map[string]string{"LOCAL_INPUT": "SHARED_INPUT"},
+		Env: osutil.ExpandableMap{
+			"LOCAL_INPUT": osutil.NewExpandableString("prefix-${SHARED_INPUT}-${UNSET_INPUT:-fallback}"),
+			"LOCAL_COPY":  osutil.NewExpandableString("${SHARED_INPUT}"),
+			"LITERAL":     osutil.NewExpandableString("fixed"),
+		},
 	}))
+	require.Equal(t, "updated-live-input", provider.env.Getenv("LOCAL_COPY"))
+	require.Equal(t, "fixed", provider.env.Getenv("LITERAL"))
+	deps.env.DotenvSet("SHARED_INPUT", "changed-after-initialize")
+	require.Equal(t, "prefix-updated-live-input-fallback", provider.env.Getenv("LOCAL_INPUT"))
+	require.Equal(t, "updated-live-input", provider.env.Getenv("LOCAL_COPY"))
+	require.NotContains(t, deps.env.Dotenv(), "LOCAL_INPUT")
+	require.NotContains(t, deps.env.Dotenv(), "LOCAL_COPY")
+	require.NotContains(t, deps.env.Dotenv(), "LITERAL")
 
 	contents, err := os.ReadFile(envPath)
 	require.NoError(t, err)
@@ -346,7 +363,7 @@ func TestLayerProviderInitialization_PersistsRealEnvironment(t *testing.T) {
 	require.NoError(t, deps.envManager.Reload(t.Context(), deps.env))
 	value, has := deps.env.Config.GetString("infra.parameters.input")
 	require.True(t, has)
-	require.Equal(t, "updated-live-input", value)
+	require.Equal(t, "prefix-updated-live-input-fallback", value)
 	secret, has := deps.env.Config.GetString("infra.parameters.password")
 	require.True(t, has)
 	require.Equal(t, "generated-secret", secret)

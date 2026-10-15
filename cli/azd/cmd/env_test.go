@@ -1520,7 +1520,7 @@ func Test_EnvRefreshAction_Run_RefreshesOutputs(t *testing.T) {
 	pm.AssertExpectations(t)
 }
 
-func Test_EnvRefreshAction_Run_AppliesAliases(t *testing.T) {
+func Test_EnvRefreshAction_Run_AppliesOutputMappings(t *testing.T) {
 	t.Parallel()
 
 	provider := &mockRefreshProvider{stateResult: &provisioning.StateResult{
@@ -1537,7 +1537,7 @@ func Test_EnvRefreshAction_Run_AppliesAliases(t *testing.T) {
 			Name:     "infra",
 			Provider: provisioning.Bicep,
 			Path:     "infra",
-			Aliases: map[string]string{
+			Outputs: map[string]string{
 				"LOCAL_OUTPUT":  "SHARED_OUTPUT",
 				"SHARED_OUTPUT": "OTHER_OUTPUT",
 			},

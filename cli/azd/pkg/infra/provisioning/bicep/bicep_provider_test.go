@@ -101,6 +101,97 @@ func TestBicepParameters_UsesScopedConfiguration(t *testing.T) {
 	require.Equal(t, "backing", value)
 }
 
+func TestBicepParameters_LocalPromptProvenance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		paramType   string
+		expression  string
+		input       string
+		saved       any
+		want        any
+		localPrompt bool
+	}{
+		{name: "empty input uses saved prompt", paramType: "string", expression: "${LOCAL_INPUT}",
+			saved: "prompted-value", want: "prompted-value", localPrompt: true},
+		{name: "numeric env input overrides saved prompt", paramType: "int", expression: "${LOCAL_INPUT}",
+			input: "003", saved: int64(99), want: int64(3)},
+		{name: "boolean env input overrides saved prompt", paramType: "bool", expression: "${LOCAL_INPUT}",
+			input: "TRUE", saved: false, want: true},
+		{name: "composite input overrides saved prompt", paramType: "string", expression: "${LOCAL_INPUT}/suffix",
+			input: "configured", saved: "old-prompt", want: "configured/suffix"},
+		{name: "literal file value overrides saved prompt", paramType: "string", expression: "file-value",
+			saved: "old-prompt", want: "file-value"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "main.parameters.json"), fmt.Appendf(nil,
+				`{"parameters":{"input":{"value":%q}}}`, tt.expression,
+			), 0600))
+			backing := environment.NewWithValues("test", map[string]string{
+				environment.LocationEnvVarName: "westus2",
+			})
+			require.NoError(t, backing.Config.Set("infra.parameters.input", tt.saved))
+			provider := &BicepProvider{
+				env:  environment.NewInputEnvironment(backing, map[string]string{"LOCAL_INPUT": tt.input}),
+				path: filepath.Join(dir, "main.bicep"), mode: bicepMode,
+				options: provisioning.Options{Module: "main"}, curPrincipal: &mockCurrentPrincipal{},
+				compileBicepMemoryCache: &compileBicepResult{Template: azure.ArmTemplate{
+					Parameters: azure.ArmTemplateParameterDefinitions{"input": {Type: tt.paramType}},
+				}},
+			}
+			parameters, err := provider.Parameters(t.Context())
+			require.NoError(t, err)
+			require.Len(t, parameters, 1)
+			require.Equal(t, tt.want, parameters[0].Value)
+			require.Equal(t, tt.localPrompt, parameters[0].LocalPrompt)
+			if tt.localPrompt {
+				provider.env.DotenvSet("LOCAL_INPUT", "configured-after-prompt")
+				parameters, err = provider.Parameters(t.Context())
+				require.NoError(t, err)
+				require.Len(t, parameters, 1)
+				require.Equal(t, "configured-after-prompt", parameters[0].Value)
+				require.False(t, parameters[0].LocalPrompt)
+			}
+		})
+	}
+}
+
+func TestBicepParameters_TracksPromptWithoutSavedConfig(t *testing.T) {
+	t.Parallel()
+
+	mockContext := mocks.NewMockContext(t.Context())
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.parameters.json"), []byte(
+		`{"parameters":{"location":{"value":"${LOCAL_INPUT}"}}}`), 0600))
+	backing := environment.NewWithValues("test", map[string]string{environment.LocationEnvVarName: "westus2"})
+	mockContext.Console.WhenPrompt(func(options input.ConsoleOptions) bool {
+		return strings.Contains(options.Message, "'location'")
+	}).Respond("prompted-location")
+	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", mock.Anything, backing).Return(nil).Once()
+	provider := &BicepProvider{
+		env:     environment.NewInputEnvironment(backing, map[string]string{"LOCAL_INPUT": ""}),
+		path:    filepath.Join(dir, "main.bicep"),
+		options: provisioning.Options{Module: "main"},
+		console: mockContext.Console, envManager: envManager, curPrincipal: &mockCurrentPrincipal{},
+		compileBicepMemoryCache: &compileBicepResult{Template: azure.ArmTemplate{
+			Parameters: azure.ArmTemplateParameterDefinitions{"location": {Type: "string"}},
+		}},
+	}
+	parameters, err := provider.Parameters(t.Context())
+	require.NoError(t, err)
+	require.Len(t, parameters, 1)
+	require.Equal(t, "prompted-location", parameters[0].Value)
+	require.True(t, parameters[0].LocalPrompt)
+	_, saved := backing.Config.Get("infra.parameters.location")
+	require.False(t, saved, "location-named parameters must not depend on a config marker to report a prompt")
+	envManager.AssertExpectations(t)
+}
+
 func TestBicepLoadParameters_UsesScopedEnvironment(t *testing.T) {
 	t.Parallel()
 
@@ -130,88 +221,52 @@ func TestBicepLoadParameters_UsesScopedEnvironment(t *testing.T) {
 func TestBicepCompile_MissingEnvironmentVariableUsesDefault(t *testing.T) {
 	prepareBicepCompileEnvironmentTest(t)
 
-	const providerKey = "AZD_TEST_ALIAS_PROVIDER_VALUE"
-	const projectKey = "AZD_TEST_ALIAS_PROJECT_VALUE"
+	const providerKey = "AZD_TEST_INPUT_PROVIDER_VALUE"
 	unsetProcessEnvironmentVariable(t, providerKey)
-	unsetProcessEnvironmentVariable(t, projectKey)
 
-	tests := []struct {
-		name    string
-		aliases map[string]string
-	}{
-		// The provider reads its own variable name when no project mapping exists.
-		{name: "Unaliased"},
-		// The provider name maps to a different project variable, which is also absent.
-		{name: "Aliased", aliases: map[string]string{
-			providerKey: projectKey,
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			env := environment.NewMappedScopedEnvironment(environment.New("test"), tt.aliases)
-			_, found := env.LookupEnv(providerKey)
-			require.False(t, found)
+	env := environment.NewInputEnvironment(environment.New("test"), nil)
+	_, found := env.LookupEnv(providerKey)
+	require.False(t, found)
 
-			result, err := compileBicepEnvironmentVariable(t, env, providerKey, true)
-			require.NoError(t, err)
-			parameter, found := result.Parameters["value"]
-			require.True(t, found)
-			assert.Equal(t, "fallback", parameter.Value)
-		})
-	}
+	result, err := compileBicepEnvironmentVariable(t, env, providerKey, true)
+	require.NoError(t, err)
+	parameter, found := result.Parameters["value"]
+	require.True(t, found)
+	assert.Equal(t, "fallback", parameter.Value)
 }
 
 func TestBicepCompile_MissingRequiredEnvironmentVariableFails(t *testing.T) {
 	prepareBicepCompileEnvironmentTest(t)
 
-	const providerKey = "AZD_TEST_ALIAS_PROVIDER_VALUE"
-	const projectKey = "AZD_TEST_ALIAS_PROJECT_VALUE"
+	const providerKey = "AZD_TEST_INPUT_PROVIDER_VALUE"
 	unsetProcessEnvironmentVariable(t, providerKey)
-	unsetProcessEnvironmentVariable(t, projectKey)
 
-	tests := []struct {
-		name    string
-		aliases map[string]string
-	}{
-		// A required provider variable must fail when it is absent directly.
-		{name: "Unaliased"},
-		// A required provider variable must also fail when its mapped project variable is absent.
-		{name: "Aliased", aliases: map[string]string{providerKey: projectKey}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			env := environment.NewMappedScopedEnvironment(environment.New("test"), tt.aliases)
-			_, found := env.LookupEnv(providerKey)
-			require.False(t, found)
+	env := environment.NewInputEnvironment(environment.New("test"), nil)
+	_, found := env.LookupEnv(providerKey)
+	require.False(t, found)
 
-			_, err := compileBicepEnvironmentVariable(t, env, providerKey, false)
-			require.Error(t, err, "Bicep must reject an absent required project variable")
-			require.ErrorContains(t, err, providerKey)
-		})
-	}
+	_, err := compileBicepEnvironmentVariable(t, env, providerKey, false)
+	require.Error(t, err, "Bicep must reject an absent required variable")
+	require.ErrorContains(t, err, providerKey)
 }
 
-func TestBicepCompile_AliasedEnvironmentVariableUsesProjectValue(t *testing.T) {
+func TestBicepCompile_ResolvedInputEnvironmentVariableUsesValue(t *testing.T) {
 	prepareBicepCompileEnvironmentTest(t)
 
-	const providerKey = "AZD_TEST_ALIAS_PROVIDER_VALUE"
-	const projectKey = "AZD_TEST_ALIAS_PROJECT_VALUE"
+	const providerKey = "AZD_TEST_INPUT_PROVIDER_VALUE"
 	unsetProcessEnvironmentVariable(t, providerKey)
-	unsetProcessEnvironmentVariable(t, projectKey)
 
 	values := []string{
-		// An explicitly empty project value is present and must not select the Bicep default.
+		// An empty resolved input is present and must not select the Bicep default.
 		"",
-		// A non-empty project value must reach Bicep through the provider alias.
 		"project-value",
+		"${NOT_REEXPANDED}",
 	}
 	for _, value := range values {
 		t.Run(fmt.Sprintf("value=%q", value), func(t *testing.T) {
-			backing := environment.New("test")
-			backing.DotenvSet(projectKey, value)
-			env := environment.NewMappedScopedEnvironment(
-				backing,
-				map[string]string{providerKey: projectKey},
+			env := environment.NewInputEnvironment(
+				environment.New("test"),
+				map[string]string{providerKey: value},
 			)
 			actual, found := env.LookupEnv(providerKey)
 			require.True(t, found)
@@ -226,27 +281,25 @@ func TestBicepCompile_AliasedEnvironmentVariableUsesProjectValue(t *testing.T) {
 	}
 }
 
-func TestBicepCompile_MissingAliasedEnvironmentVariableIgnoresProcessEnvironmentValue(t *testing.T) {
+func TestBicepCompile_EmptyInputOverridesProcessEnvironmentValue(t *testing.T) {
 	prepareBicepCompileEnvironmentTest(t)
 
-	const providerKey = "AZD_TEST_ALIAS_PROVIDER_VALUE"
-	const projectKey = "AZD_TEST_ALIAS_PROJECT_VALUE"
-	// Only the provider-named process environment variable exists; the mapped project variable remains absent.
+	const providerKey = "AZD_TEST_INPUT_PROVIDER_VALUE"
 	t.Setenv(providerKey, "process-value")
-	unsetProcessEnvironmentVariable(t, projectKey)
 
-	env := environment.NewMappedScopedEnvironment(
+	env := environment.NewInputEnvironment(
 		environment.New("test"),
-		map[string]string{providerKey: projectKey},
+		map[string]string{providerKey: ""},
 	)
-	_, found := env.LookupEnv(providerKey)
-	require.False(t, found)
+	value, found := env.LookupEnv(providerKey)
+	require.True(t, found)
+	require.Empty(t, value)
 
 	result, err := compileBicepEnvironmentVariable(t, env, providerKey, true)
 	require.NoError(t, err)
 	parameter, found := result.Parameters["value"]
 	require.True(t, found)
-	assert.Equal(t, "fallback", parameter.Value)
+	assert.Equal(t, "", parameter.Value)
 }
 
 func prepareBicepCompileEnvironmentTest(t *testing.T) {
@@ -308,54 +361,6 @@ func compileBicepEnvironmentVariable(
 	}
 
 	return provider.compileBicep(t.Context())
-}
-
-func TestBicepEnsureParameters_PersistsLocationFromProcessEnvironmentUnderProjectName(t *testing.T) {
-	for _, aliased := range []bool{false, true} {
-		t.Run(fmt.Sprintf("aliased=%t", aliased), func(t *testing.T) {
-			const projectLocation = "AZD_TEST_ALIAS_PROJECT_LOCATION"
-			for _, key := range []string{environment.LocationEnvVarName, projectLocation} {
-				t.Setenv(key, "")
-				require.NoError(t, os.Unsetenv(key))
-			}
-			locationKey := environment.LocationEnvVarName
-			var aliases map[string]string
-			if aliased {
-				locationKey = projectLocation
-				aliases = map[string]string{environment.LocationEnvVarName: projectLocation}
-			}
-			t.Setenv(locationKey, "westus2")
-
-			backing := environment.New("test")
-			env := environment.NewMappedScopedEnvironment(backing, aliases)
-			require.Equal(t, "westus2", env.GetLocation())
-			require.NotContains(t, backing.Dotenv(), locationKey)
-
-			var savedValues map[string]string
-			envManager := &mockenv.MockEnvManager{}
-			envManager.On("Save", mock.Anything, backing).Run(func(mock.Arguments) {
-				savedValues = backing.Dotenv()
-			}).Return(nil)
-			dir := t.TempDir()
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "main.parameters.json"), []byte(
-				`{"parameters":{"location":{"value":"${AZURE_LOCATION}"}}}`), 0o600))
-			provider := &BicepProvider{
-				env: env, envManager: envManager, curPrincipal: &mockCurrentPrincipal{},
-				path: filepath.Join(dir, "main.bicep"), options: provisioning.Options{Module: "main"},
-			}
-			parameters, err := provider.ensureParameters(t.Context(), azure.ArmTemplate{
-				Parameters: azure.ArmTemplateParameterDefinitions{"location": {Type: "string"}},
-			})
-			require.NoError(t, err)
-			require.Equal(t, "westus2", parameters["location"].Value, "resolution alone is not persistence")
-			assert.Equal(t, "westus2", backing.Dotenv()[locationKey], "persist under the project name")
-			assert.Equal(t, "westus2", savedValues[locationKey], "Save must receive the resolved location")
-			envManager.AssertCalled(t, "Save", mock.Anything, backing)
-			if aliased {
-				assert.NotContains(t, backing.Dotenv(), environment.LocationEnvVarName)
-			}
-		})
-	}
 }
 
 func TestBicepPlan(t *testing.T) {

@@ -22,7 +22,7 @@ type CurrentPrincipalIdProvider interface {
 }
 
 func NewPrincipalIdProvider(
-	env environment.ScopedEnvironment,
+	env *environment.Environment,
 	userProfileService *azapi.UserProfileService,
 	subResolver account.SubscriptionResolver,
 	authManager *auth.Manager,
@@ -36,7 +36,7 @@ func NewPrincipalIdProvider(
 }
 
 type principalIDProvider struct {
-	env                environment.ScopedEnvironment
+	env                *environment.Environment
 	userProfileService *azapi.UserProfileService
 	subResolver        account.SubscriptionResolver
 	authManager        *auth.Manager

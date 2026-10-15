@@ -40,16 +40,19 @@ An alternative IaC provider supported by azd. Terraform configurations use HCL s
 
 ### Provider View
 
-The variable names an infrastructure provider reads or emits. A provider input variable is an environment variable referenced by the provider's parameter file, not necessarily the IaC parameter name. Variable aliases translate these names to the [project view](#project-view).
+The variable names an infrastructure provider reads or emits. A provider input variable is an environment variable referenced by the provider's parameter file, not necessarily the IaC parameter name. Infrastructure entries can set local inputs through `env` and rename returned outputs through `outputs`.
 
 ### Project View
 
-The environment variable names the project stores and supplies to CI. The `aliases` map is written as
-`PROVIDER_VARIABLE: PROJECT_VARIABLE`. For the built-in Bicep and Terraform providers, reads, writes, and deletes
-through a provider name use its project name, including prompted inputs and deployment outputs. Custom provisioning
-providers can use aliases for outputs, but they do not receive the scoped environment that translates provider inputs.
-These views describe naming, not separate persisted environments. See
-[Infrastructure Layer Variable Aliases](../reference/azure-yaml-schema.md#infrastructure-layer-variable-aliases).
+The shared environment variable names the project stores and supplies to CI. For Bicep and Terraform,
+`env` defines provider-local inputs with literals or expressions such as `LOCAL_INPUT: ${PROJECT_INPUT}`.
+Expressions evaluate once against shared project values with process fallback, not against other local inputs.
+Only explicitly listed input keys keep their writes and deletes local to the provider instance.
+For all providers, including custom providers, `outputs` maps returned names as `PROVIDER_OUTPUT: PROJECT_VARIABLE`.
+Environment identity, deployment scope, principal identity, and `AZD_*` controls stay shared: local input keys
+and both sides of output mappings cannot use these names, but input expressions may read them.
+These views do not create separate persisted environments. See
+[Infrastructure Layer Inputs and Outputs](../reference/azure-yaml-schema.md#infrastructure-layer-inputs-and-outputs).
 
 ### Provisioning
 

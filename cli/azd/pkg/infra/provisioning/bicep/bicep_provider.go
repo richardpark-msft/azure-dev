@@ -284,6 +284,8 @@ type BicepProvider struct {
 	// Internal state
 	// compileBicepResult is cached to avoid recompiling the same bicep file multiple times in the same azd run.
 	compileBicepMemoryCache *compileBicepResult
+	// locallyResolvedParameters tracks values that need local config, generation, or prompting to resolve.
+	locallyResolvedParameters map[string]bool
 }
 
 // Name gets the name of the infra provider
@@ -3483,8 +3485,9 @@ func (p *BicepProvider) ensureParameters(
 	ctx context.Context,
 	template azure.ArmTemplate,
 ) (azure.ArmParameters, error) {
-	// Persist a location supplied by the process environment before resolving parameters.
-	locationSystemEnv, hasLocation := p.env.LookupEnv(environment.LocationEnvVarName)
+	p.locallyResolvedParameters = make(map[string]bool)
+	//snapshot the AZURE_LOCATIOn in azd env if it is set in System env
+	locationSystemEnv, hasLocation := os.LookupEnv(environment.LocationEnvVarName)
 	_, hasAzdLocation := p.env.Dotenv()[environment.LocationEnvVarName]
 	if hasLocation && !hasAzdLocation && locationSystemEnv != "" {
 		p.env.SetLocation(locationSystemEnv)
@@ -3607,6 +3610,7 @@ func (p *BicepProvider) ensureParameters(
 
 		if v, has := p.env.GetConfig().Get(configKey); has {
 			if isValueAssignableToParameterType(parameterType, v) {
+				p.locallyResolvedParameters[key] = true
 				configuredParameters[key] = azure.ArmParameter{
 					Value: v,
 				}
@@ -3632,6 +3636,7 @@ func (p *BicepProvider) ensureParameters(
 				Value: genValue,
 			}
 			mustSetParamAsConfig(key, genValue, p.env.GetConfig(), param.Secure())
+			p.locallyResolvedParameters[key] = true
 			configModified = true
 			continue
 		}
@@ -3670,6 +3675,7 @@ func (p *BicepProvider) ensureParameters(
 				key := prompt.key
 				value := values[prompt.key]
 				mustSetParamAsConfig(key, value, p.env.GetConfig(), prompt.param.Secure())
+				p.locallyResolvedParameters[key] = true
 				configModified = true
 				configuredParameters[key] = azure.ArmParameter{
 					Value: value,
@@ -3684,6 +3690,7 @@ func (p *BicepProvider) ensureParameters(
 				if err != nil {
 					return nil, fmt.Errorf("prompting for value: %w", err)
 				}
+				p.locallyResolvedParameters[key] = true
 
 				if key != "location" {
 					// location param is special.
@@ -3887,7 +3894,6 @@ func (p *BicepProvider) Parameters(ctx context.Context) ([]provisioning.Paramete
 			continue
 		}
 
-		_, isPrompt := p.env.GetConfig().Get(fmt.Sprintf("infra.parameters.%s", key))
 		singleMapping := len(parametersInfo.envMapping[key]) == 1
 		usingEnvVarMapping := false
 		if singleMapping {
@@ -3899,10 +3905,9 @@ func (p *BicepProvider) Parameters(ctx context.Context) ([]provisioning.Paramete
 			Secret:        param.Secure(),
 			Value:         resolvedParams[key].Value,
 			EnvVarMapping: parametersInfo.envMapping[key],
-			// No env var mapping and param is persisted in env config infra.parameters means local prompt only
-			// If user set an env var mapping after a local prompt, the env var overrides the value persisted in config
-			// which turns local prompt false
-			LocalPrompt:        isPrompt && !usingEnvVarMapping,
+			// Only values that still depend on local state need a prompt export;
+			// a saved config entry may have been overridden by a parameter-file value.
+			LocalPrompt:        p.locallyResolvedParameters[key] && !usingEnvVarMapping,
 			UsingEnvVarMapping: usingEnvVarMapping,
 		})
 	}

@@ -6,6 +6,7 @@ package provisioning
 import (
 	"testing"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/azure/azure-dev/cli/azd/pkg/output"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,7 +312,7 @@ func TestOptionsValidate(t *testing.T) {
 		require.NoError(t, opts.Validate())
 	})
 
-	t.Run("aliases allow built-in, inferred, or extension providers", func(t *testing.T) {
+	t.Run("outputs allow built-in inferred and custom providers", func(t *testing.T) {
 		for _, provider := range []ProviderKind{
 			NotSpecified,
 			Bicep,
@@ -323,11 +324,84 @@ func TestOptionsValidate(t *testing.T) {
 					Name:     "producer",
 					Path:     "infra/producer",
 					Provider: provider,
-					Aliases:  map[string]string{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
+					Outputs:  map[string]string{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
 				}}}
 
 				require.NoError(t, opts.Validate())
 			})
 		}
 	})
+
+	t.Run("env rejects custom providers", func(t *testing.T) {
+		opts := &Options{Layers: []Options{{
+			Name:     "producer",
+			Path:     "infra/producer",
+			Provider: ProviderKind("contoso.custom"),
+			Env:      osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${PROJECT_INPUT}")},
+		}}}
+
+		err := opts.Validate()
+
+		require.ErrorContains(t, err, `provider "contoso.custom" is not supported`)
+	})
+}
+
+func TestLayerEnvValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		env     osutil.ExpandableMap
+		wantErr string
+	}{
+		{
+			name: "multiple inputs share source",
+			env: osutil.ExpandableMap{
+				"FIRST": osutil.NewExpandableString("${SOURCE}"), "SECOND": osutil.NewExpandableString("${SOURCE}"),
+			},
+		},
+		{
+			name: "shared context may be referenced",
+			env: osutil.ExpandableMap{
+				"INPUT": osutil.NewExpandableString("${AZURE_SUBSCRIPTION_ID}/${AZURE_LOCATION}"),
+			},
+		},
+		{
+			name: "malformed expression", env: osutil.ExpandableMap{"INPUT": osutil.NewExpandableString("${SOURCE")},
+			wantErr: `parsing env input "INPUT"`,
+		},
+		{
+			name:    "reserved context key",
+			env:     osutil.ExpandableMap{"azure_location": osutil.NewExpandableString("westus")},
+			wantErr: `env input variable "azure_location" is reserved by azd`,
+		},
+		{
+			name:    "reserved control key",
+			env:     osutil.ExpandableMap{"azd_internal": osutil.NewExpandableString("true")},
+			wantErr: `env input variable "azd_internal" is reserved by azd`,
+		},
+		{
+			name: "case-only duplicate",
+			env: osutil.ExpandableMap{
+				"INPUT": osutil.NewExpandableString("first"), "input": osutil.NewExpandableString("second"),
+			},
+			wantErr: `env input names "INPUT" and "input" differ only by case`,
+		},
+		{
+			name: "invalid name", env: osutil.ExpandableMap{"BAD-NAME": osutil.NewExpandableString("value")},
+			wantErr: `env input variable "BAD-NAME" must match`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			options := Options{Layers: []Options{{Name: "test", Path: "infra", Env: tt.env}}}
+			err := options.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
 }

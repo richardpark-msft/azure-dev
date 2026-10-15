@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,8 +42,9 @@ func mayUseStandardParameters(layer provisioning.Options) bool {
 
 // Package-level compiled regexes for output and env-var reference extraction.
 var (
-	bicepOutputRe   = regexp.MustCompile(`(?m)^\s*output\s+(\w+)\s+`)
-	paramEnvSubstRe = regexp.MustCompile(`\$\{(\w+)\}`)
+	bicepOutputRe = regexp.MustCompile(`(?m)^\s*output\s+(\w+)\s+`)
+	// Match the start of a reference so modifiers and nested defaults retain every dependency.
+	paramEnvSubstRe = regexp.MustCompile(`\$\{(\w+)`)
 	paramReadEnvRe  = regexp.MustCompile(
 		`readEnvironmentVariable\s*\(\s*'([^']+)'`,
 	)
@@ -173,8 +175,8 @@ func AnalyzeLayerDependencies(
 		}
 		for _, name := range outputs {
 			sharedName := name
-			if alias, has := layer.Aliases[name]; has {
-				sharedName = alias
+			if destination, has := layer.Outputs[name]; has {
+				sharedName = destination
 			}
 
 			if prev, exists := g.outputProviders[sharedName]; exists && prev != i {
@@ -196,21 +198,32 @@ func AnalyzeLayerDependencies(
 		}
 	}
 
-	// Phase 2 — Discover input env-var references and build edges for Bicep and
-	// extension providers that use standard parameter files. Built-in non-Bicep
-	// providers retain their existing explicit-dependency behavior.
+	// Phase 2 — Discover explicit env expressions for every layer and parameter-file
+	// references for providers that use standard parameter files.
 	var safeFallback []int
 	for i, layer := range layers {
-		if !mayUseStandardParameters(layer) {
-			continue
+		var refs []string
+		hasUnknown := false
+		if mayUseStandardParameters(layer) {
+			refs, hasUnknown = discoverParamEnvRefs(ctx, resolved[i], projectPath)
 		}
-		refs, hasUnknown := discoverParamEnvRefs(ctx, resolved[i], projectPath)
-		for _, ref := range refs {
-			sharedName := ref
-			if alias, has := layer.Aliases[ref]; has {
-				sharedName = alias
+		// Explicit env entries shadow ambient values, even when the entry is a literal.
+		// Resolve each expression against the project view, never against other env entries.
+		projectRefs := map[string]struct{}{}
+		for name := range layer.Env {
+			refs = append(refs, name)
+		}
+		for _, name := range refs {
+			sources, err := layer.EnvReferences(name)
+			if err != nil {
+				return nil, fmt.Errorf("discovering env inputs for layer %q: %w", layer.Name, err)
 			}
+			for _, source := range sources {
+				projectRefs[source] = struct{}{}
+			}
+		}
 
+		for _, sharedName := range slices.Sorted(maps.Keys(projectRefs)) {
 			if provider, ok := g.outputProviders[sharedName]; ok && provider != i {
 				// Always keep intra-graph edges, even when the ref is
 				// already in the environment from a previous run. The

@@ -1324,6 +1324,12 @@ func generatePipelineDefinition(path string, props projectProperties) error {
 		}
 	}
 
+	tmplContext.Secrets = slices.Compact(slices.Sorted(slices.Values(tmplContext.Secrets)))
+	tmplContext.Variables = slices.Compact(slices.Sorted(slices.Values(tmplContext.Variables)))
+	tmplContext.Variables = slices.DeleteFunc(tmplContext.Variables, func(name string) bool {
+		return slices.Contains(tmplContext.Secrets, name)
+	})
+
 	err = tmpl.Execute(&builder, tmplContext)
 	if err != nil {
 		return fmt.Errorf("executing template: %w", err)

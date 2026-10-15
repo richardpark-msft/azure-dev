@@ -110,80 +110,144 @@ have permission to pull the image through its managed identity or registry crede
 When `imagePassthrough` is omitted or `false`, an external service image can still be pulled and copied into the
 configured destination registry.
 
-## Infrastructure Layer Variable Aliases
+## Infrastructure Layer Inputs and Outputs
 
-Each entry under `infra.layers[]` or `layers[].infra[]` can translate between
-the **[provider view](../concepts/glossary.md#provider-view)** and the
-**[project view](../concepts/glossary.md#project-view)**:
+Each entry under `infra.layers[]` or `layers[].infra[]` can define provider-local
+inputs and map provider outputs to the shared project environment. These properties
+are not supported on root `infra`.
 
-- The provider view uses the variable names an infrastructure provider reads or emits.
-- The project view uses the environment variable names the project stores and supplies to CI.
-- The `aliases` map is written as `PROVIDER_VARIABLE: PROJECT_VARIABLE`.
+| Property | Type | Description |
+|---|---|---|
+| `env` | map of strings | Provider-local input names and literal values or environment-substitution expressions. Supported by Bicep and Terraform |
+| `outputs` | map of strings | `PROVIDER_OUTPUT: PROJECT_VARIABLE` mappings. Supported by all providers, including custom and extension providers |
 
 ```yaml
 infra:
   layers:
     - name: producer
       path: infra/producer
-      aliases:
+      provider: bicep
+      outputs:
         PROVIDER_ENDPOINT: PROJECT_ENDPOINT
     - name: consumer
       path: infra/consumer
-      aliases:
-        PROVIDER_INPUT: PROJECT_ENDPOINT
+      provider: terraform
+      env:
+        PROVIDER_INPUT: ${PROJECT_ENDPOINT}
+        PROVIDER_URL: https://${PROJECT_HOST}/api
+        RETRY_COUNT: "3"
+        OPTIONAL_INPUT: ${OPTIONAL_PROJECT_INPUT:-fallback}
+        EMPTY_INPUT: ""
 ```
 
-An alias identifies the same variable in both views. Reads, writes, and deletes through
-the provider name use the project name. This includes values saved by prompts and
-deployment outputs. Names without a mapping keep their original names.
-For parameter inputs, the provider variable is the name referenced by the parameter
-file, not necessarily the IaC parameter name.
+### Provider-local inputs
 
-Each provider name maps to one project variable for all operations. Aliases apply
-once: with `A: B` and `B: C`, a provider reference to `A` refers to project variable
-`B`, not `C`.
+The `env` key is the name in the **[provider view](../concepts/glossary.md#provider-view)**.
+For parameter inputs, this is the environment variable referenced by the parameter
+file, not necessarily the IaC parameter name. Its value is a string: a literal,
+an environment-substitution expression, or a combination of both.
 
-Missing project variables remain missing through their provider names, including
-in Bicep parameter-file compilation. An explicitly empty project variable remains
-present with an empty value. Writing through the provider name creates or updates
-the project variable.
+azd evaluates these expressions once when it initializes the provider, using the
+shared **[project view](../concepts/glossary.md#project-view)** with process-environment
+fallback. An explicitly empty project value overrides process fallback. Missing
+or empty references expand to empty unless the expression supplies a default,
+such as `${PROJECT_INPUT:-fallback}`.
 
-Output aliases apply to built-in and custom provisioning providers because azd maps
-provider outputs into the project view after provisioning. Input aliases apply only
-to the built-in Bicep and Terraform providers. Custom providers do not receive the
-scoped environment that translates project-view names into provider-view input names.
+All entries use the same source view. They do not read each other's expanded
+values: with `A: ${B}` and `B: ${C}`, `A` reads shared `B`, not the local value
+derived from `C`. Multiple entries can read the same source variable.
 
-Names on both sides of the alias map must match `^[A-Za-z_][A-Za-z0-9_]*$`.
-azd checks this when it loads the project configuration.
+Only keys explicitly listed in `env` are local. Environment writes and deletes for
+these keys stay in that provider instance and do not change the shared project
+environment. Other variable reads, writes, deletes, and provider-specific
+configuration retain their existing behavior. An explicitly empty local value
+also overrides fallback.
 
-In this example, the producer's `PROVIDER_ENDPOINT` output is stored as
-`PROJECT_ENDPOINT`. The consumer reads that value as `PROVIDER_INPUT`. The producer
-can use any provisioning provider, but the consumer input alias requires Bicep or
-Terraform. For Bicep layers, azd uses the aliases during static dependency analysis,
-so the consumer waits for the producer.
-Terraform dependencies are not inferred from aliases. Declare
-`dependsOn: [producer]` on the consumer when it needs the producer's outputs.
-This also applies to Bicep consumers of Terraform outputs.
+Custom and extension providers reject nonempty `env` maps. An empty `env: {}` is
+allowed, as is an `outputs` map without `env`. azd also checks the effective
+provider at runtime when it is inherited or inferred.
 
-Pipeline configuration exports parameter variables and secrets using project-view
-names. Outputs from earlier layers are also tracked in the project view while
-planning later layers.
+### Output names
 
-Service environment-update events also use project-view output names during
-provisioning and `azd env refresh`. This includes the .NET user-secrets integration,
-which converts `__` in those names to the .NET configuration separator `:`.
+The `outputs` map only renames provider outputs. It does not define provider inputs
+or redirect general environment writes. The mapping applies once to outputs from
+deployment, state reads, and `azd env refresh`; planned output metadata; lifecycle
+events; and keys invalidated during destroy. Unmapped outputs retain their names.
+With `A: B` and `B: C`, output `A` becomes project variable `B`, not `C`.
 
-Each project variable can be targeted by only one alias within an infrastructure
-entry. azd rejects duplicate destinations when it loads the project configuration,
-because aliases apply to writes as well as reads.
+Service environment-update events use these project output names, including
+the .NET user-secrets integration, which converts `__` in names to `:`.
 
-An aliased deployment output can also collide with an output that has no alias.
-Since provider output names are not declared in `azure.yaml`, azd checks for these
-collisions after deployment, before writing any deployment outputs to the environment.
+A mapped output can collide with an unmapped output. Since provider outputs are
+not all declared in `azure.yaml`, azd checks the returned names for collisions
+before writing deployment outputs.
 
-Aliases do not bypass the environment filter for dynamic loader variables.
+Post-deploy `azd.operations.yaml` processing uses a temporary component view with
+the provider's current local input values and raw returned output names. Returned
+outputs take precedence in this view only; they do not replace the provider's
+original inputs. This lets a reusable operations file keep referring to its local
+output names even when the project publishes different names. Local input values
+and raw output names are not persisted by operations processing. Hooks continue to
+use the project environment.
+
+### Names and execution context
+
+`env` keys and both sides of `outputs` must match `^[A-Za-z_][A-Za-z0-9_]*$`.
+Within each infrastructure entry, azd checks `env` keys, `outputs` keys, and
+`outputs` destinations for case-insensitive uniqueness so the configuration
+works consistently on Windows. Repeated source variables in `env` expressions
+are allowed.
+
+The following azd execution-context variables are shared across infrastructure
+entries. They cannot be `env` keys or appear on either side of `outputs`:
+
+- `AZURE_ENV_NAME`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_LOCATION`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_PRINCIPAL_ID`
+- `AZURE_PRINCIPAL_TYPE`
+- Any variable whose name starts with `AZD_`, matched case-insensitively
+
+`env` expressions may read these shared variables, for example
+`COMPONENT_REGION: ${AZURE_LOCATION}`. Use local keys for component inputs, not
+for environment identity, deployment scope, authentication identity, or process controls.
+
+### Dependencies and pipelines
+
+In the example, the producer's `PROVIDER_ENDPOINT` output is stored as
+`PROJECT_ENDPOINT`, and the consumer reads it as `PROVIDER_INPUT`. Static dependency
+analysis follows `env` expression sources for Bicep or Terraform consumers of known
+Bicep outputs, using the mapped project output names. A local `env` key shadows
+the shared variable with that name; analysis follows its expression without
+recursively following other local entries. Literals introduce no source dependency.
+
+Terraform and custom provider output names are not discovered statically. Use
+`dependsOn: [producer]` when a consumer depends on these outputs, or on values
+written by hooks.
+
+Pipeline configuration exports the source project variables and secrets referenced
+by input expressions, not the derived strings or provider-local names. Literal
+values require no exports. Outputs from earlier layers are tracked by their project
+names when planning later layers and are not exported as CI inputs because provisioning
+creates them. When the provider supplies no sensitivity metadata for a referenced
+source, azd conservatively exports it as a secret. Source names are deduplicated;
+if any reference marks a source secret, secret classification wins.
+
+CI export preserves explicitly empty source values instead of replacing them
+with process-environment values. Process fallback applies only when the project
+source is absent, so expressions with defaults behave the same locally and in CI.
+
+If a parameter still requires a locally prompted or generated value despite its `env` inputs,
+pipeline configuration stops with an error rather than discarding that value.
+Set the source project variables or correct the infrastructure entry's `env`
+values before configuring the pipeline. Unrelated parameters keep their existing
+prompt-to-CI behavior.
+
+Local inputs do not bypass the environment filter for dynamic loader variables.
 Names in the `LD_` and `DYLD_` namespaces are excluded from `Dotenv()` and
-subprocess environments, including when introduced by an alias.
+subprocess environments, including when introduced through `env`.
 
 ## Hooks
 

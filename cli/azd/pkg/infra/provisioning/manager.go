@@ -37,7 +37,8 @@ type Manager struct {
 	serviceLocator      ioc.ServiceLocator
 	defaultProvider     DefaultProviderResolver
 	envManager          environment.Manager
-	env                 environment.ScopedEnvironment
+	env                 *environment.Environment
+	inputEnv            environment.ScopedEnvironment
 	console             input.Console
 	provider            Provider
 	alphaFeatureManager *alpha.FeatureManager
@@ -62,6 +63,7 @@ func (m *Manager) Initialize(ctx context.Context, projectPath string, options Op
 
 	m.projectPath = projectPath
 	m.options = &infraOptions
+	m.inputEnv = nil
 
 	provider, err := m.newProvider(ctx)
 	if err != nil {
@@ -69,25 +71,34 @@ func (m *Manager) Initialize(ctx context.Context, projectPath string, options Op
 	}
 
 	m.provider = provider
-	infraOptions.VirtualEnv = m.virtualInputsForProviderView(options.VirtualEnv)
-	return m.provider.Initialize(ctx, projectPath, infraOptions)
+	providerOptions := infraOptions
+	providerOptions.VirtualEnv, err = m.virtualInputsForProviderView(options.VirtualEnv)
+	if err != nil {
+		return err
+	}
+	return m.provider.Initialize(ctx, projectPath, providerOptions)
 }
 
-func (m *Manager) virtualInputsForProviderView(projectInputs map[string]string) map[string]string {
-	if m.options.VirtualEnv == nil || len(m.options.Aliases) == 0 {
-		return m.options.VirtualEnv
+func (m *Manager) virtualInputsForProviderView(projectInputs map[string]string) (map[string]string, error) {
+	if projectInputs == nil || len(m.options.Env) == 0 {
+		return projectInputs, nil
 	}
 
-	providerInputs := maps.Clone(m.options.VirtualEnv)
-	// Read from the project view, not the copy being translated, so overlapping aliases apply only once.
-	for providerName, projectName := range m.options.Aliases {
-		if value, has := projectInputs[projectName]; has {
-			providerInputs[providerName] = value
-		} else {
-			delete(providerInputs, providerName)
+	providerInputs := maps.Clone(projectInputs)
+	for providerName := range m.options.Env {
+		delete(providerInputs, providerName)
+		references, err := m.options.EnvReferences(providerName)
+		if err != nil {
+			return nil, err
+		}
+		for _, reference := range references {
+			if _, virtual := projectInputs[reference]; virtual {
+				providerInputs[providerName] = ""
+				break
+			}
 		}
 	}
-	return providerInputs
+	return providerInputs, nil
 }
 
 // Parameters returns provisioning parameters with environment mappings expressed in the project view.
@@ -99,27 +110,82 @@ func (m *Manager) Parameters(ctx context.Context) ([]Parameter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return m.parametersForProjectView(parameters), nil
+	return m.parametersForProjectView(parameters)
 }
 
-func (m *Manager) parametersForProjectView(parameters []Parameter) []Parameter {
-	if len(m.options.Aliases) == 0 {
-		return parameters
+func (m *Manager) parametersForProjectView(parameters []Parameter) ([]Parameter, error) {
+	if len(m.options.Env) == 0 {
+		return parameters, nil
 	}
 
-	// CI must export project variables; the scoped environment translates provider-variable reads.
-	// Keep the provider's own metadata in the provider view.
+	// Keep the provider's local metadata intact; only the pipeline-facing copy uses project sources.
 	projectParameters := slices.Clone(parameters)
+	coveredInputs := map[string]struct{}{}
 	for i := range projectParameters {
-		projectParameters[i].EnvVarMapping = slices.Clone(parameters[i].EnvVarMapping)
-
-		for j, providerName := range projectParameters[i].EnvVarMapping {
-			if projectName, has := m.options.Aliases[providerName]; has {
-				projectParameters[i].EnvVarMapping[j] = projectName
+		var projectNames []string
+		overridden := false
+		for _, providerName := range parameters[i].EnvVarMapping {
+			references, err := m.options.EnvReferences(providerName)
+			if err != nil {
+				return nil, err
+			}
+			// Earlier-layer outputs are produced during CI provisioning, not supplied as external inputs.
+			references = m.externalInputSources(references)
+			projectNames = append(projectNames, references...)
+			if _, has := m.options.Env[providerName]; has {
+				// Presence in env makes this a local assignment, even if its value
+				// happens to match the project variable with the same name.
+				overridden = true
+				coveredInputs[providerName] = struct{}{}
 			}
 		}
+		if overridden {
+			if parameters[i].LocalPrompt {
+				// env expressions are one-way assignments. We cannot safely turn a
+				// prompted or generated value back into values for their source variables.
+				return nil, fmt.Errorf(
+					"parameter %q depends on a local prompt or generated value that its env inputs cannot reproduce in CI. "+
+						"Set the source project variables or update the infrastructure entry's env values "+
+						"before configuring the pipeline",
+					parameters[i].Name,
+				)
+			}
+			projectParameters[i].EnvVarMapping = slices.Compact(slices.Sorted(slices.Values(projectNames)))
+			// A nil value makes pipeline export read each source independently. Exporting
+			// the derived value could lose source values or apply interpolation twice in CI.
+			projectParameters[i].Value = nil
+		} else {
+			projectParameters[i].EnvVarMapping = slices.Clone(parameters[i].EnvVarMapping)
+		}
 	}
-	return projectParameters
+
+	// Providers such as Terraform may omit parameter metadata. Include declared env
+	// sources they did not describe, without duplicating inputs handled above.
+	for _, name := range slices.Sorted(maps.Keys(m.options.Env)) {
+		if _, covered := coveredInputs[name]; covered {
+			continue
+		}
+		sources, err := m.options.EnvReferences(name)
+		if err != nil {
+			return nil, err
+		}
+		sources = m.externalInputSources(sources)
+		if len(sources) > 0 {
+			// Some providers do not report parameter metadata. Export their input sources
+			// as secrets rather than guessing whether a derived value is sensitive.
+			projectParameters = append(projectParameters, Parameter{
+				Name: "env." + name, Secret: true, EnvVarMapping: sources, UsingEnvVarMapping: true,
+			})
+		}
+	}
+	return projectParameters, nil
+}
+
+func (m *Manager) externalInputSources(sources []string) []string {
+	return slices.DeleteFunc(sources, func(name string) bool {
+		_, producedByEarlierLayer := m.options.VirtualEnv[name]
+		return producedByEarlierLayer
+	})
 }
 
 // PlannedOutputs returns the current plan's output names in the project view.
@@ -135,13 +201,13 @@ func (m *Manager) PlannedOutputs(ctx context.Context) ([]PlannedOutput, error) {
 }
 
 func (m *Manager) plannedOutputsForProjectView(outputs []PlannedOutput) []PlannedOutput {
-	if len(m.options.Aliases) == 0 {
+	if len(m.options.Outputs) == 0 {
 		return outputs
 	}
 
 	projectOutputs := slices.Clone(outputs)
 	for i := range projectOutputs {
-		if projectName, has := m.options.Aliases[projectOutputs[i].Name]; has {
+		if projectName, has := m.options.Outputs[projectOutputs[i].Name]; has {
 			projectOutputs[i].Name = projectName
 		}
 	}
@@ -155,13 +221,13 @@ func (m *Manager) State(ctx context.Context, options *StateOptions) (*StateResul
 		return nil, fmt.Errorf("error retrieving state: %w", err)
 	}
 
-	if result == nil || result.State == nil || len(m.options.Aliases) == 0 {
+	if result == nil || result.State == nil || len(m.options.Outputs) == 0 {
 		return result, nil
 	}
 
-	projectOutputs, err := ApplyOutputAliases(result.State.Outputs, m.options.Aliases)
+	projectOutputs, err := ApplyOutputMappings(result.State.Outputs, m.options.Outputs)
 	if err != nil {
-		return nil, fmt.Errorf("applying state output aliases: %w", err)
+		return nil, fmt.Errorf("applying state output mappings: %w", err)
 	}
 
 	projectState := *result.State
@@ -193,16 +259,13 @@ func (m *Manager) Deploy(ctx context.Context) (*DeployResult, error) {
 		m.console.StopSpinner(ctx, "Didn't find new changes.", input.StepSkipped)
 	}
 
-	// YAML validation cannot see provider outputs without aliases. Check all destinations
-	// before writing any output, while retaining provider-view names in the deployment result.
-	if len(m.options.Aliases) > 0 {
-		if _, err := ApplyOutputAliases(deployResult.Deployment.Outputs, m.options.Aliases); err != nil {
-			return nil, fmt.Errorf("validating deployment output aliases: %w", err)
-		}
+	// Check destinations before writing any output, retaining the provider's original result.
+	projectOutputs, err := ApplyOutputMappings(deployResult.Deployment.Outputs, m.options.Outputs)
+	if err != nil {
+		return nil, fmt.Errorf("mapping deployment outputs: %w", err)
 	}
 
-	scopedEnv := m.scopedEnvironment()
-	if err := UpdateEnvironment(ctx, deployResult.Deployment.Outputs, scopedEnv, m.envManager); err != nil {
+	if err := UpdateEnvironment(ctx, projectOutputs, m.env, m.envManager); err != nil {
 		return nil, fmt.Errorf("updating environment with deployment outputs: %w", err)
 	}
 
@@ -210,7 +273,11 @@ func (m *Manager) Deploy(ctx context.Context) (*DeployResult, error) {
 	if !filepath.IsAbs(infraRoot) {
 		infraRoot = filepath.Join(m.projectPath, m.options.Path)
 	}
-	bindMountOperations, err := azdFileShareUploadOperations(infraRoot, scopedEnv)
+	operationEnv, err := m.operationEnvironment(deployResult.Deployment.Outputs)
+	if err != nil {
+		return nil, fmt.Errorf("preparing component operations environment: %w", err)
+	}
+	bindMountOperations, err := azdFileShareUploadOperations(infraRoot, operationEnv)
 	azdOperationsEnabled := m.alphaFeatureManager.IsEnabled(AzdOperationsFeatureKey)
 	if !azdOperationsEnabled && len(bindMountOperations) > 0 {
 		m.console.Message(ctx, ErrBindMountOperationDisabled.Error())
@@ -220,7 +287,7 @@ func (m *Manager) Deploy(ctx context.Context) (*DeployResult, error) {
 			return nil, fmt.Errorf("looking for azd fileShare upload operations: %w", err)
 		}
 		if err := doBindMountOperation(
-			ctx, bindMountOperations, scopedEnv, m.console, m.fileShareService, m.cloud.StorageEndpointSuffix); err != nil {
+			ctx, bindMountOperations, m.env, m.console, m.fileShareService, m.cloud.StorageEndpointSuffix); err != nil {
 			return nil, fmt.Errorf("error running bind mount operation: %w", err)
 		}
 	}
@@ -229,6 +296,32 @@ func (m *Manager) Deploy(ctx context.Context) (*DeployResult, error) {
 	m.console.StopSpinner(ctx, "", input.StepDone)
 
 	return deployResult, nil
+}
+
+func (m *Manager) operationEnvironment(outputs map[string]OutputParameter) (environment.ScopedEnvironment, error) {
+	var env environment.ScopedEnvironment = m.env
+	if m.inputEnv != nil {
+		inputs := make(map[string]string, len(m.options.Env))
+		var deleted []string
+		for name := range m.options.Env {
+			value, present := m.inputEnv.LookupEnv(name)
+			inputs[name] = value
+			if !present {
+				deleted = append(deleted, name)
+			}
+		}
+		env = environment.NewInputEnvironment(env, inputs)
+		for _, name := range deleted {
+			env.DotenvDelete(name)
+		}
+	}
+
+	values, err := outputEnvironmentValues(outputs)
+	if err != nil {
+		return nil, err
+	}
+	// Operations consume component-local results without publishing raw names or replacing provider inputs.
+	return environment.NewInputEnvironment(env, values), nil
 }
 
 const (
@@ -324,7 +417,7 @@ var ErrBindMountOperationDisabled = fmt.Errorf(
 func doBindMountOperation(
 	ctx context.Context,
 	fileShareUploadOperations []azdOperationFileShareUpload,
-	env environment.ScopedEnvironment,
+	env *environment.Environment,
 	console input.Console,
 	fileShareService storage.FileShareService,
 	cloudStorageEndpointSuffix string,
@@ -402,16 +495,17 @@ func (m *Manager) Destroy(ctx context.Context, options DestroyOptions) (*Destroy
 		return nil, fmt.Errorf("error deleting Azure resources: %w", err)
 	}
 
-	scopedEnv := m.scopedEnvironment()
-
 	// Remove any outputs from the template from the environment since destroying the infrastructure
 	// invalidated them all.
 	for _, key := range destroyResult.InvalidatedEnvKeys {
-		scopedEnv.DotenvDelete(key)
+		if projectName, mapped := m.options.Outputs[key]; mapped {
+			key = projectName
+		}
+		m.env.DotenvDelete(key)
 	}
 
 	// Update environment files to remove invalid infrastructure parameters
-	if err := m.envManager.Save(ctx, scopedEnv.BackingEnv()); err != nil {
+	if err := m.envManager.Save(ctx, m.env); err != nil {
 		return nil, fmt.Errorf("saving environment: %w", err)
 	}
 
@@ -421,29 +515,40 @@ func (m *Manager) Destroy(ctx context.Context, options DestroyOptions) (*Destroy
 func UpdateEnvironment(
 	ctx context.Context,
 	outputs map[string]OutputParameter,
-	env environment.ScopedEnvironment,
+	env *environment.Environment,
 	envManager environment.Manager,
 ) error {
 	if len(outputs) > 0 {
-		for key, param := range outputs {
-			// Complex types marshalled as JSON strings, simple types marshalled as simple strings
-			if param.Type == ParameterTypeArray || param.Type == ParameterTypeObject {
-				bytes, err := json.Marshal(param.Value)
-				if err != nil {
-					return fmt.Errorf("invalid value for output parameter '%s' (%s): %w", key, string(param.Type), err)
-				}
-				env.DotenvSet(key, string(bytes))
-			} else {
-				env.DotenvSet(key, fmt.Sprintf("%v", param.Value))
-			}
+		values, err := outputEnvironmentValues(outputs)
+		if err != nil {
+			return err
+		}
+		for key, value := range values {
+			env.DotenvSet(key, value)
 		}
 
-		if err := envManager.Save(ctx, env.BackingEnv()); err != nil {
+		if err := envManager.Save(ctx, env); err != nil {
 			return fmt.Errorf("writing environment: %w", err)
 		}
 	}
 
 	return nil
+}
+
+func outputEnvironmentValues(outputs map[string]OutputParameter) (map[string]string, error) {
+	values := make(map[string]string, len(outputs))
+	for key, param := range outputs {
+		if param.Type == ParameterTypeArray || param.Type == ParameterTypeObject {
+			bytes, err := json.Marshal(param.Value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid value for output parameter '%s' (%s): %w", key, string(param.Type), err)
+			}
+			values[key] = string(bytes)
+		} else {
+			values[key] = fmt.Sprintf("%v", param.Value)
+		}
+	}
+	return values, nil
 }
 
 type EnsureSubscriptionAndLocationOptions struct {
@@ -459,10 +564,12 @@ type EnsureSubscriptionAndLocationOptions struct {
 func EnsureSubscriptionAndLocation(
 	ctx context.Context,
 	envManager environment.Manager,
-	env environment.ScopedEnvironment,
+	scopedEnv environment.ScopedEnvironment,
 	prompter prompt.Prompter,
 	options EnsureSubscriptionAndLocationOptions,
 ) error {
+	env := scopedEnv.BackingEnv()
+
 	subId := env.GetSubscriptionId()
 	if subId == "" {
 		if prompter.IsNoPromptMode() {
@@ -492,7 +599,7 @@ func EnsureSubscriptionAndLocation(
 	// For example, on CI, when running `azd provision`, we want the .env to have the subscription id and location
 	// so that `azd deploy` can just use the values from .env w/o checking os-env again.
 	env.SetSubscriptionId(subId)
-	if err := envManager.Save(ctx, env.BackingEnv()); err != nil {
+	if err := envManager.Save(ctx, env); err != nil {
 		return err
 	}
 
@@ -528,15 +635,17 @@ func EnsureSubscriptionAndLocation(
 
 	// Same as before, this make sure the location is persisted in the .env file.
 	env.SetLocation(location)
-	return envManager.Save(ctx, env.BackingEnv())
+	return envManager.Save(ctx, env)
 }
 
 func EnsureSubscription(
 	ctx context.Context,
 	envManager environment.Manager,
-	env environment.ScopedEnvironment,
+	scopedEnv environment.ScopedEnvironment,
 	prompter prompt.Prompter,
 ) error {
+	env := scopedEnv.BackingEnv()
+
 	subId := env.GetSubscriptionId()
 	if subId == "" {
 		if prompter.IsNoPromptMode() {
@@ -566,10 +675,10 @@ func EnsureSubscription(
 	// For example, on CI, when running `azd provision`, we want the .env to have the subscription id and location
 	// so that `azd deploy` can just use the values from .env w/o checking os-env again.
 	env.SetSubscriptionId(subId)
-	if err := envManager.Save(ctx, env.BackingEnv()); err != nil {
+	if err := envManager.Save(ctx, env); err != nil {
 		return err
 	}
-	return envManager.Save(ctx, env.BackingEnv())
+	return envManager.Save(ctx, env)
 }
 
 // Creates a new instance of the Provisioning Manager
@@ -577,7 +686,7 @@ func NewManager(
 	serviceLocator ioc.ServiceLocator,
 	defaultProvider DefaultProviderResolver,
 	envManager environment.Manager,
-	env environment.ScopedEnvironment,
+	env *environment.Environment,
 	console input.Console,
 	alphaFeatureManager *alpha.FeatureManager,
 	fileShareService storage.FileShareService,
@@ -623,35 +732,45 @@ func (m *Manager) newProvider(ctx context.Context) (Provider, error) {
 		providerKey = defaultProvider
 	}
 
-	container, isNestedContainer := m.serviceLocator.(*ioc.NestedContainer)
-	if !isNestedContainer {
-		if len(m.options.Aliases) == 0 {
-			var provider Provider
-			if err := m.serviceLocator.ResolveNamed(string(providerKey), &provider); err != nil {
-				return nil, fmt.Errorf("failed resolving IaC provider '%s': %w", providerKey, err)
-			}
+	resolvedOptions := *m.options
+	resolvedOptions.Provider = providerKey
+	if err := validateLayerVariables(resolvedOptions); err != nil {
+		return nil, err
+	}
 
-			return provider, nil
+	if len(m.options.Env) == 0 {
+		var provider Provider
+		if err := m.serviceLocator.ResolveNamed(string(providerKey), &provider); err != nil {
+			return nil, fmt.Errorf("failed resolving IaC provider '%s': %w", providerKey, err)
 		}
 
+		return provider, nil
+	}
+
+	container, isNestedContainer := m.serviceLocator.(*ioc.NestedContainer)
+	if !isNestedContainer {
 		return nil, errors.New("provisioning provider requires a scoped service container")
 	}
 
-	providerScope, err := container.NewScope()
-	if err != nil {
-		return nil, fmt.Errorf("creating provisioning provider scope: %w", err)
-	}
-	// Providers retain the registered environment and persistence policy; only the manager stages layer outputs.
+	// Keep command-scoped services intact. Only explicit provider inputs change.
+	providerScope := ioc.NewNestedContainer(container)
+	// Capture options rather than the manager: providers can outlive a later Initialize call.
+	inputs := m.options.Env
 	providerScope.MustRegisterSingleton(func() (environment.ScopedEnvironment, error) {
-		var env environment.ScopedEnvironment
-		if err := container.Resolve(&env); err != nil {
+		var providerEnv environment.ScopedEnvironment
+		if err := container.Resolve(&providerEnv); err != nil {
 			return nil, fmt.Errorf("resolving provider environment: %w", err)
 		}
 
-		return environment.NewMappedScopedEnvironment(
-			env, m.options.Aliases,
-		), nil
+		snapshot := environment.NewWithValues(providerEnv.Name(), providerEnv.Dotenv())
+		values, err := inputs.Expand(snapshot.Getenv)
+		if err != nil {
+			return nil, fmt.Errorf("resolving provider env inputs: %w", err)
+		}
+		m.inputEnv = environment.NewInputEnvironment(providerEnv, values)
+		return m.inputEnv, nil
 	})
+	ioc.RegisterInstance[input.Console](providerScope, m.console)
 
 	var provider Provider
 	err = providerScope.ResolveNamed(string(providerKey), &provider)
@@ -660,13 +779,6 @@ func (m *Manager) newProvider(ctx context.Context) (Provider, error) {
 	}
 
 	return provider, nil
-}
-
-func (m *Manager) scopedEnvironment() environment.ScopedEnvironment {
-	return environment.NewMappedScopedEnvironment(
-		m.env,
-		m.options.Aliases,
-	)
 }
 
 const (

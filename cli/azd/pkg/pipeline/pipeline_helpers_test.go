@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/azure-devops-go-api/azuredevops/v7/build"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/azure/azure-dev/cli/azd/pkg/cloud"
 	"github.com/azure/azure-dev/cli/azd/pkg/config"
@@ -22,6 +23,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/exec"
 	"github.com/azure/azure-dev/cli/azd/pkg/graphsdk"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/azure/azure-dev/cli/azd/pkg/tools/github"
 	"github.com/azure/azure-dev/cli/azd/test/mocks"
 )
@@ -571,25 +573,130 @@ func Test_mergeProjectVariablesAndSecrets_providerParams(
 }
 
 // ------------------------------------------------------------------
-// mergeProjectVariablesAndSecrets — empty values skipped
+// mergeProjectVariablesAndSecrets — explicit empty values
 // ------------------------------------------------------------------
 
-func Test_mergeProjectVariablesAndSecrets_emptyEnvSkipped(
+func Test_mergeProjectVariablesAndSecrets_explicitEmptyEnvPreserved(
 	t *testing.T,
 ) {
 	env := map[string]string{
-		"VAR1": "",
-		"VAR2": "value2",
+		"VAR1": "", "VAR2": "value2", "SECRET": "",
 	}
-	vars, _, err := mergeProjectVariablesAndSecrets(
-		[]string{"VAR1", "VAR2"}, nil,
-		map[string]string{}, map[string]string{},
+	vars, secrets, err := mergeProjectVariablesAndSecrets(
+		[]string{"VAR1", "VAR2"}, []string{"SECRET"},
+		map[string]string{"VAR1": "old-value"}, map[string]string{"SECRET": "old-secret"},
 		nil, env)
 	require.NoError(t, err)
-	// VAR1 has empty value, should NOT be in variables
-	_, hasVar1 := vars["VAR1"]
-	assert.False(t, hasVar1)
-	assert.Equal(t, "value2", vars["VAR2"])
+	require.Equal(t, map[string]string{"VAR1": "", "VAR2": "value2"}, vars)
+	require.Equal(t, map[string]string{"SECRET": ""}, secrets)
+}
+
+func Test_mergeProjectVariablesAndSecrets_sourcePresence(t *testing.T) {
+	const source = "AZD_TEST_PIPELINE_SOURCE_PRESENCE"
+	tests := []struct {
+		name           string
+		project        map[string]string
+		process        string
+		processPresent bool
+		want           string
+		wantPresent    bool
+	}{
+		{name: "project wins", project: map[string]string{source: "project"}, process: "ambient",
+			processPresent: true, want: "project", wantPresent: true},
+		{name: "empty project wins", project: map[string]string{source: ""}, process: "ambient",
+			processPresent: true, wantPresent: true},
+		{name: "missing project uses process", process: "ambient", processPresent: true,
+			want: "ambient", wantPresent: true},
+		{name: "empty process stays present", processPresent: true, wantPresent: true},
+		{name: "missing source stays missing"},
+	}
+	for _, tt := range tests {
+		for _, secret := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/secret=%t", tt.name, secret), func(t *testing.T) {
+				t.Setenv(source, tt.process)
+				if !tt.processPresent {
+					require.NoError(t, os.Unsetenv(source))
+				}
+				variables, secrets, err := mergeProjectVariablesAndSecrets(
+					nil, nil, map[string]string{}, map[string]string{},
+					[]provisioning.Parameter{{Name: "env.INPUT", Secret: secret, EnvVarMapping: []string{source}}},
+					tt.project,
+				)
+				require.NoError(t, err)
+				values := variables
+				if secret {
+					values = secrets
+				}
+				value, present := values[source]
+				require.Equal(t, tt.wantPresent, present)
+				require.Equal(t, tt.want, value)
+			})
+		}
+	}
+}
+
+func Test_mergeProjectVariablesAndSecrets_derivedSingleSourceExportsRawValue(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		raw     string
+		derived any
+	}{
+		{name: "composite", raw: "host", derived: "https://host/api"},
+		{name: "number", raw: "003", derived: int64(3)},
+		{name: "boolean", raw: "TRUE", derived: true},
+		{name: "default", raw: "", derived: "fallback"},
+	} {
+		for _, secret := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/secret=%t", tt.name, secret), func(t *testing.T) {
+				t.Parallel()
+				variables, secrets, err := mergeProjectVariablesAndSecrets(
+					nil, nil, map[string]string{}, map[string]string{},
+					[]provisioning.Parameter{{
+						Name: "derived", Value: tt.derived, Secret: secret, EnvVarMapping: []string{"SOURCE"},
+					}}, map[string]string{"SOURCE": tt.raw},
+				)
+				require.NoError(t, err)
+				values := variables
+				if secret {
+					values = secrets
+				}
+				require.Equal(t, map[string]string{"SOURCE": tt.raw}, values)
+			})
+		}
+	}
+}
+
+func Test_mergeProjectVariablesAndSecrets_emptyExpressionSourcePreservesDefault(t *testing.T) {
+	const source = "AZD_TEST_PIPELINE_EMPTY_PROJECT_SOURCE"
+	t.Setenv(source, "ambient-value")
+	mockContext := mocks.NewMockContext(t.Context())
+	provider := &paramsOnlyProvider{parameters: []provisioning.Parameter{{
+		Name: "input", Value: "fallback", EnvVarMapping: []string{"LOCAL_INPUT"}, UsingEnvVarMapping: true,
+	}}}
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
+		return provider
+	})
+	manager := provisioning.NewManager(
+		mockContext.Container, nil, nil,
+		environment.NewWithValues("test", map[string]string{source: ""}),
+		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	expression := osutil.NewExpandableString("${" + source + ":-fallback}")
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Bicep, Env: osutil.ExpandableMap{"LOCAL_INPUT": expression},
+	}))
+	parameters, err := manager.Parameters(t.Context())
+	require.NoError(t, err)
+	variables, _, err := mergeProjectVariablesAndSecrets(
+		nil, nil, map[string]string{}, map[string]string{}, parameters, map[string]string{source: ""},
+	)
+	require.NoError(t, err)
+	value, present := variables[source]
+	require.True(t, present)
+	require.Empty(t, value)
+	ciValue, err := expression.Envsubst(func(name string) string { return variables[name] })
+	require.NoError(t, err)
+	require.Equal(t, "fallback", ciValue)
 }
 
 // ------------------------------------------------------------------
@@ -1070,7 +1177,7 @@ func Test_DefaultRoleNames(t *testing.T) {
 }
 
 // ------------------------------------------------------------------
-// mergeProjectVariablesAndSecrets — layer aliases
+// mergeProjectVariablesAndSecrets — layer inputs
 // ------------------------------------------------------------------
 
 type paramsOnlyProvider struct {
@@ -1086,7 +1193,7 @@ func (p *paramsOnlyProvider) Parameters(context.Context) ([]provisioning.Paramet
 	return p.parameters, nil
 }
 
-// CI must use project variable names so the provider can read their values through its aliases.
+// CI exports source variables, not the provider's already-expanded input values.
 func Test_mergeProjectVariablesAndSecrets_usesStorageProjectVariables(t *testing.T) {
 	mockContext := mocks.NewMockContext(t.Context())
 	provider := &paramsOnlyProvider{parameters: []provisioning.Parameter{
@@ -1096,12 +1203,12 @@ func Test_mergeProjectVariablesAndSecrets_usesStorageProjectVariables(t *testing
 		{Name: "environmentName", Value: "the-environment-name",
 			EnvVarMapping: []string{"AZURE_ENV_NAME"}, UsingEnvVarMapping: true},
 	}}
-	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Test), func() provisioning.Provider {
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
 		return provider
 	})
 	manager := provisioning.NewManager(
 		mockContext.Container,
-		func() (provisioning.ProviderKind, error) { return provisioning.Test, nil },
+		func() (provisioning.ProviderKind, error) { return provisioning.Bicep, nil },
 		nil,
 		environment.New("test"),
 		mockContext.Console,
@@ -1112,10 +1219,10 @@ func Test_mergeProjectVariablesAndSecrets_usesStorageProjectVariables(t *testing
 
 	err := manager.Initialize(t.Context(), "", provisioning.Options{
 		Name:     "primary-storage",
-		Provider: provisioning.Test,
+		Provider: provisioning.Bicep,
 		Path:     "infra/storage",
-		Aliases: map[string]string{
-			"STORAGE_INSTANCE_NAME": "PRIMARY_STORAGE_INSTANCE_NAME",
+		Env: osutil.ExpandableMap{
+			"STORAGE_INSTANCE_NAME": osutil.NewExpandableString("${PRIMARY_STORAGE_INSTANCE_NAME}"),
 		},
 	})
 	require.NoError(t, err)
@@ -1123,7 +1230,7 @@ func Test_mergeProjectVariablesAndSecrets_usesStorageProjectVariables(t *testing
 	parameters, err := manager.Parameters(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, []provisioning.Parameter{
-		{Name: "instanceName", Value: "primary",
+		{Name: "instanceName",
 			EnvVarMapping: []string{"PRIMARY_STORAGE_INSTANCE_NAME"}, UsingEnvVarMapping: true},
 		{Name: "location", Value: "eastus", EnvVarMapping: []string{"AZURE_LOCATION"}, UsingEnvVarMapping: true},
 		{Name: "environmentName", Value: "the-environment-name",
@@ -1148,12 +1255,14 @@ func Test_mergeProjectVariablesAndSecrets_usesStorageProjectVariables(t *testing
 	require.Empty(t, secrets)
 }
 
-func Test_mergeProjectVariablesAndSecrets_aliasesSecretsAndCombinedInputs(t *testing.T) {
+func Test_mergeProjectVariablesAndSecrets_explicitInputsSecretsAndComposites(t *testing.T) {
 	provider := &paramsOnlyProvider{parameters: []provisioning.Parameter{
-		{Name: "location", Value: "eastus", EnvVarMapping: []string{"PROVIDER_LOCATION"}, UsingEnvVarMapping: true},
-		{Name: "dbPass", Value: "s3cret", Secret: true, EnvVarMapping: []string{"PROVIDER_DB_CONN"},
-			UsingEnvVarMapping: true},
+		{Name: "location", Value: "eastus",
+			EnvVarMapping: []string{"PROVIDER_LOCATION"}, UsingEnvVarMapping: true},
+		{Name: "dbPass", Value: "password=s3cret;host=db.example", Secret: true,
+			EnvVarMapping: []string{"PROVIDER_DB_CONN"}, UsingEnvVarMapping: true},
 		{Name: "plain", Value: "kept", EnvVarMapping: []string{"UNALIASED"}, UsingEnvVarMapping: true},
+		{Name: "literal", Value: "fixed", EnvVarMapping: []string{"LITERAL"}},
 		// CI reads each source variable separately for a combined parameter
 		// value (ex: "${PROVIDER_LOCATION}${UNALIASED_MULTI}").
 		// It must read the project variable PROJECT_LOCATION, not the provider variable PROVIDER_LOCATION.
@@ -1161,12 +1270,12 @@ func Test_mergeProjectVariablesAndSecrets_aliasesSecretsAndCombinedInputs(t *tes
 	}}
 
 	mockContext := mocks.NewMockContext(t.Context())
-	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Test), func() provisioning.Provider {
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
 		return provider
 	})
 	manager := provisioning.NewManager(
 		mockContext.Container,
-		func() (provisioning.ProviderKind, error) { return provisioning.Test, nil },
+		func() (provisioning.ProviderKind, error) { return provisioning.Bicep, nil },
 		nil,
 		environment.New("test"),
 		mockContext.Console,
@@ -1176,11 +1285,12 @@ func Test_mergeProjectVariablesAndSecrets_aliasesSecretsAndCombinedInputs(t *tes
 	)
 
 	err := manager.Initialize(t.Context(), "", provisioning.Options{
-		Provider: provisioning.Test,
-		Aliases: map[string]string{
-			// The provider reads project values through its provider variable names.
-			"PROVIDER_LOCATION": "PROJECT_LOCATION",
-			"PROVIDER_DB_CONN":  "PROJECT_DB_CONN",
+		Provider: provisioning.Bicep,
+		Env: osutil.ExpandableMap{
+			"PROVIDER_LOCATION": osutil.NewExpandableString("${PROJECT_LOCATION}"),
+			"PROVIDER_DB_CONN": osutil.NewExpandableString(
+				"password=${PROJECT_DB_CONN};host=${PROJECT_DB_HOST:-${DEFAULT_DB_HOST}}"),
+			"LITERAL": osutil.NewExpandableString("fixed"),
 		},
 	})
 	require.NoError(t, err)
@@ -1188,19 +1298,30 @@ func Test_mergeProjectVariablesAndSecrets_aliasesSecretsAndCombinedInputs(t *tes
 	parameters, err := manager.Parameters(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, []provisioning.Parameter{
-		{Name: "location", Value: "eastus", EnvVarMapping: []string{"PROJECT_LOCATION"}, UsingEnvVarMapping: true},
-		{Name: "dbPass", Value: "s3cret", Secret: true, EnvVarMapping: []string{"PROJECT_DB_CONN"},
+		{Name: "location", EnvVarMapping: []string{"PROJECT_LOCATION"}, UsingEnvVarMapping: true},
+		{Name: "dbPass", Secret: true,
+			EnvVarMapping:      []string{"DEFAULT_DB_HOST", "PROJECT_DB_CONN", "PROJECT_DB_HOST"},
 			UsingEnvVarMapping: true},
 		{Name: "plain", Value: "kept", EnvVarMapping: []string{"UNALIASED"}, UsingEnvVarMapping: true},
-		{Name: "multi", Value: "x", EnvVarMapping: []string{"PROJECT_LOCATION", "UNALIASED_MULTI"}},
+		{Name: "literal"},
+		{Name: "multi", EnvVarMapping: []string{"PROJECT_LOCATION", "UNALIASED_MULTI"}},
 	}, parameters)
+	require.Equal(t, "password=s3cret;host=db.example", provider.parameters[1].Value)
+	require.False(t, provider.parameters[1].LocalPrompt)
+	require.Equal(t, []string{"PROVIDER_DB_CONN"}, provider.parameters[1].EnvVarMapping)
 
 	vars, secrets, err := mergeProjectVariablesAndSecrets(
 		nil, nil, map[string]string{}, map[string]string{}, parameters,
 		map[string]string{
 			"PROJECT_LOCATION":  "project-location",
 			"PROVIDER_LOCATION": "provider-location",
-			"UNALIASED_MULTI":   "unaliased-multi"})
+			"UNALIASED_MULTI":   "unaliased-multi",
+			"PROJECT_DB_CONN":   "s3cret",
+			"PROJECT_DB_HOST":   "db.example",
+			"DEFAULT_DB_HOST":   "fallback.example",
+			"PROVIDER_DB_CONN":  "must-not-be-exported",
+			"LITERAL":           "must-not-be-exported",
+		})
 	require.NoError(t, err)
 
 	require.Equal(t, map[string]string{
@@ -1208,5 +1329,121 @@ func Test_mergeProjectVariablesAndSecrets_aliasesSecretsAndCombinedInputs(t *tes
 		"UNALIASED":        "kept",
 		"UNALIASED_MULTI":  "unaliased-multi",
 	}, vars)
-	require.Equal(t, map[string]string{"PROJECT_DB_CONN": "s3cret"}, secrets)
+	require.Equal(t, map[string]string{
+		"PROJECT_DB_CONN": "s3cret", "PROJECT_DB_HOST": "db.example", "DEFAULT_DB_HOST": "fallback.example",
+	}, secrets)
+}
+
+func Test_mergeProjectVariablesAndSecrets_unreportedInputSourcesAreSecrets(t *testing.T) {
+	mockContext := mocks.NewMockContext(t.Context())
+	provider := &paramsOnlyProvider{}
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Terraform), func() provisioning.Provider {
+		return provider
+	})
+	manager := provisioning.NewManager(
+		mockContext.Container,
+		func() (provisioning.ProviderKind, error) { return provisioning.Terraform, nil },
+		nil, environment.New("test"), mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Terraform,
+		Env: osutil.ExpandableMap{
+			"LOCAL_ENDPOINT": osutil.NewExpandableString("${BASE_URL}/${LAYER_OUTPUT}/${PREFIX:-fallback}"),
+			"LOCAL_INTERNAL": osutil.NewExpandableString("${LAYER_OUTPUT}"),
+			"LOCAL_LITERAL":  osutil.NewExpandableString("fixed"),
+		},
+		VirtualEnv: map[string]string{"LAYER_OUTPUT": ""},
+	}))
+	parameters, err := manager.Parameters(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []provisioning.Parameter{{
+		Name: "env.LOCAL_ENDPOINT", Secret: true,
+		EnvVarMapping: []string{"BASE_URL", "PREFIX"}, UsingEnvVarMapping: true,
+	}}, parameters)
+
+	variables, secrets, err := mergeProjectVariablesAndSecrets(
+		nil, nil, map[string]string{}, map[string]string{}, parameters,
+		map[string]string{
+			"BASE_URL": "https://example.test", "PREFIX": "api", "LAYER_OUTPUT": "created-by-earlier-layer",
+			"LOCAL_ENDPOINT": "must-not-be-exported", "LOCAL_LITERAL": "must-not-be-exported",
+		})
+	require.NoError(t, err)
+	require.Empty(t, variables)
+	require.Equal(t, map[string]string{"BASE_URL": "https://example.test", "PREFIX": "api"}, secrets)
+}
+
+func Test_mergeProjectVariablesAndSecrets_sharedInputSourceSecretWins(t *testing.T) {
+	for _, secretFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("secret-first=%t", secretFirst), func(t *testing.T) {
+			parameters := []provisioning.Parameter{
+				{Name: "public", EnvVarMapping: []string{"SHARED_INPUT"}},
+				{Name: "secret", Secret: true, EnvVarMapping: []string{"SHARED_INPUT"}},
+			}
+			if secretFirst {
+				parameters[0], parameters[1] = parameters[1], parameters[0]
+			}
+			variables, secrets, err := mergeProjectVariablesAndSecrets(
+				[]string{"SHARED_INPUT"}, nil, map[string]string{"SHARED_INPUT": "initial-value"},
+				map[string]string{}, parameters, map[string]string{"SHARED_INPUT": "source-value"},
+			)
+			require.NoError(t, err)
+			require.Empty(t, variables)
+			require.Equal(t, map[string]string{"SHARED_INPUT": "source-value"}, secrets)
+		})
+	}
+}
+
+func Test_generatePipelineDefinition_sharedInputSourcesAreUnique(t *testing.T) {
+	for _, provider := range []ciProviderType{ciProviderGitHubActions, ciProviderAzureDevOps} {
+		t.Run(string(provider), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "azure-dev.yml")
+			require.NoError(t, generatePipelineDefinition(path, projectProperties{
+				CiProvider: provider, InfraProvider: infraProviderBicep, BranchName: "main", AuthType: AuthTypeFederated,
+				Variables: []string{"SHARED_INPUT", "NORMAL_INPUT", "NORMAL_INPUT"},
+				Secrets:   []string{"SHARED_INPUT"},
+				providerParameters: []provisioning.Parameter{
+					{Name: "public", EnvVarMapping: []string{"SHARED_INPUT", "NORMAL_INPUT", "NORMAL_INPUT"}},
+					{Name: "secret", Secret: true, EnvVarMapping: []string{"SHARED_INPUT", "SHARED_INPUT"}},
+				},
+			}))
+			contents, err := os.ReadFile(path)
+			require.NoError(t, err)
+			type step struct {
+				Name        string            `yaml:"name"`
+				DisplayName string            `yaml:"displayName"`
+				Env         map[string]string `yaml:"env"`
+			}
+			var definition struct {
+				Jobs map[string]struct {
+					Env   map[string]string `yaml:"env"`
+					Steps []step            `yaml:"steps"`
+				} `yaml:"jobs"`
+				Steps []step `yaml:"steps"`
+			}
+			// Decoding maps rejects duplicate YAML keys within each environment block.
+			require.NoError(t, yaml.Unmarshal(contents, &definition))
+			steps := definition.Steps
+			if provider == ciProviderGitHubActions {
+				build, found := definition.Jobs["build"]
+				require.True(t, found)
+				require.NotContains(t, build.Env, "SHARED_INPUT")
+				require.Equal(t, "${{ vars.NORMAL_INPUT }}", build.Env["NORMAL_INPUT"])
+				steps = build.Steps
+			}
+			checked := 0
+			for _, step := range steps {
+				if step.Name != "Provision Infrastructure" && step.DisplayName != "Provision Infrastructure" {
+					continue
+				}
+				checked++
+				if provider == ciProviderGitHubActions {
+					require.Equal(t, map[string]string{"SHARED_INPUT": "${{ secrets.SHARED_INPUT }}"}, step.Env)
+				} else {
+					require.Equal(t, "$(SHARED_INPUT)", step.Env["SHARED_INPUT"])
+					require.Equal(t, "$(NORMAL_INPUT)", step.Env["NORMAL_INPUT"])
+				}
+			}
+			require.Equal(t, 1, checked)
+		})
+	}
 }

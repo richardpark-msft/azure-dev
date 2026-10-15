@@ -9,15 +9,14 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/azure/azure-dev/cli/azd/pkg/config"
 )
 
-// ScopedEnvironment exposes environment variables and configuration to provisioning
-// providers and their environment-dependent helpers. Other consumers use *Environment.
-// Storage and backing-state operations use BackingEnv.
-// Provisioning overrides apply to providers and helpers that resolve their inputs.
-// Other consumers use the concrete Environment supplied by their caller.
+// ScopedEnvironment exposes a component's variable view to provisioning providers.
+// Environment identity, deployment scope, principal identity, and azd control variables
+// remain part of the shared backing environment.
 type ScopedEnvironment interface {
 	// BackingEnv returns the underlying environment state.
 	// It may be a layer-local snapshot rather than the shared environment.
@@ -31,9 +30,9 @@ type ScopedEnvironment interface {
 	LookupEnv(key string) (string, bool)
 	// Dotenv returns a copy of the provider-visible dotenv values without process environment fallbacks.
 	Dotenv() map[string]string
-	// DotenvSet writes a provider-scoped value to the backing dotenv state; Save persists the change.
+	// DotenvSet updates an explicit input locally; other keys update the backing dotenv state.
 	DotenvSet(key, value string)
-	// DotenvDelete removes a provider-scoped value from backing dotenv state; process fallback may remain.
+	// DotenvDelete removes an explicit input locally; other keys are removed from the backing dotenv state.
 	DotenvDelete(key string)
 	// Environ formats only the provider-visible dotenv values as KEY=VALUE entries.
 	Environ() []string
@@ -73,66 +72,87 @@ func (e *Environment) ProcessEnviron(base []string) []string {
 	return append(values, dotenv...)
 }
 
-type mappedScopedEnvironment struct {
+type inputEnvironment struct {
 	ScopedEnvironment
-	aliases map[string]string
+	keys map[string]struct{}
+	// keys is immutable; mu protects the provider-local values against concurrent access.
+	mu     sync.RWMutex
+	values map[string]string
 }
 
-// NewMappedScopedEnvironment translates variable names between the provider view and the project view.
-// Aliases use provider names as keys and project names as values for reads, writes, and deletes.
-func NewMappedScopedEnvironment(
+// NewInputEnvironment overlays resolved input values without persisting them to the backing environment.
+// Writes and deletes to explicit input keys remain local. All other keys retain their backing behavior.
+func NewInputEnvironment(
 	env ScopedEnvironment,
-	aliases map[string]string,
+	values map[string]string,
 ) ScopedEnvironment {
-	if len(aliases) == 0 {
+	if len(values) == 0 {
 		return env
 	}
 
-	return &mappedScopedEnvironment{
+	keys := make(map[string]struct{}, len(values))
+	for key := range values {
+		keys[key] = struct{}{}
+	}
+
+	return &inputEnvironment{
 		ScopedEnvironment: env,
-		aliases:           aliases,
+		keys:              keys,
+		values:            maps.Clone(values),
 	}
 }
 
-func (e *mappedScopedEnvironment) Getenv(key string) string {
-	return e.ScopedEnvironment.Getenv(e.projectKey(key))
+func (e *inputEnvironment) Getenv(key string) string {
+	value, _ := e.LookupEnv(key)
+	return value
 }
 
-func (e *mappedScopedEnvironment) LookupEnv(key string) (string, bool) {
-	return e.ScopedEnvironment.LookupEnv(e.projectKey(key))
+func (e *inputEnvironment) LookupEnv(key string) (string, bool) {
+	if _, overridden := e.keys[key]; overridden {
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		value, found := e.values[key]
+		return value, found
+	}
+	return e.ScopedEnvironment.LookupEnv(key)
 }
 
-func (e *mappedScopedEnvironment) Dotenv() map[string]string {
+func (e *inputEnvironment) Dotenv() map[string]string {
 	values := e.ScopedEnvironment.Dotenv()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 
-	// Resolve every project variable before adding provider names so overlapping aliases do not affect each other.
-	mapped := make(map[string]string, len(e.aliases))
-	for localName, sharedName := range e.aliases {
-		// Aliases must not restore loader controls excluded from the backing dotenv.
-		if isLoaderControlKey(localName) {
-			continue
-		}
-		if value, found := values[sharedName]; found {
-			mapped[localName] = value
+	for key := range e.keys {
+		delete(values, key)
+		if value, found := e.values[key]; found && !isLoaderControlKey(key) {
+			values[key] = value
 		}
 	}
-	for localName := range e.aliases {
-		delete(values, localName)
-	}
-	maps.Copy(values, mapped)
 
 	return values
 }
 
-func (e *mappedScopedEnvironment) DotenvSet(key string, value string) {
-	e.ScopedEnvironment.DotenvSet(e.projectKey(key), value)
+func (e *inputEnvironment) DotenvSet(key string, value string) {
+	if _, overridden := e.keys[key]; overridden {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.values[key] = value
+		return
+	}
+	e.ScopedEnvironment.DotenvSet(key, value)
 }
 
-func (e *mappedScopedEnvironment) DotenvDelete(key string) {
-	e.ScopedEnvironment.DotenvDelete(e.projectKey(key))
+func (e *inputEnvironment) DotenvDelete(key string) {
+	if _, overridden := e.keys[key]; overridden {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		delete(e.values, key)
+		return
+	}
+	e.ScopedEnvironment.DotenvDelete(key)
 }
 
-func (e *mappedScopedEnvironment) Environ() []string {
+func (e *inputEnvironment) Environ() []string {
 	values := e.Dotenv()
 	env := make([]string, 0, len(values))
 	for key, value := range values {
@@ -142,38 +162,29 @@ func (e *mappedScopedEnvironment) Environ() []string {
 	return env
 }
 
-// ProcessEnviron applies aliases to the complete underlying environment.
-// Missing sources remove their provider names; explicitly empty sources remain present.
-func (e *mappedScopedEnvironment) ProcessEnviron(base []string) []string {
+// ProcessEnviron overlays inputs on the complete child environment.
+// Deleted inputs remain absent even when the inherited environment contains the same key.
+func (e *inputEnvironment) ProcessEnviron(base []string) []string {
 	resolvedBase := e.ScopedEnvironment.ProcessEnviron(base)
-	providerNames := slices.Sorted(maps.Keys(e.aliases))
+	inputNames := slices.Sorted(maps.Keys(e.keys))
 	values := slices.DeleteFunc(slices.Clone(resolvedBase), func(entry string) bool {
 		name, _, found := strings.Cut(entry, "=")
-		return found && slices.ContainsFunc(providerNames, func(providerName string) bool {
-			return processEnvNameEqual(name, providerName)
+		return found && slices.ContainsFunc(inputNames, func(inputName string) bool {
+			return processEnvNameEqual(name, inputName)
 		})
 	})
 
-	// Resolve sources from one snapshot so overlapping aliases apply only once.
-	for _, providerName := range providerNames {
-		if isLoaderControlKey(providerName) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, inputName := range inputNames {
+		if isLoaderControlKey(inputName) {
 			continue
 		}
-		if value, found := lookupProcessEnv(resolvedBase, e.aliases[providerName]); found {
-			values = append(values, providerName+"="+value)
+		if value, found := e.values[inputName]; found {
+			values = append(values, inputName+"="+value)
 		}
 	}
 	return values
-}
-
-func lookupProcessEnv(values []string, key string) (string, bool) {
-	for _, entry := range slices.Backward(values) {
-		name, value, found := strings.Cut(entry, "=")
-		if found && processEnvNameEqual(name, key) {
-			return value, true
-		}
-	}
-	return "", false
 }
 
 func processEnvNameEqual(name, key string) bool {
@@ -184,38 +195,10 @@ func processEnvNameEqual(name, key string) bool {
 	return name == key
 }
 
-func (e *mappedScopedEnvironment) GetSubscriptionId() string {
-	return e.Getenv(SubscriptionIdEnvVarName)
-}
-
-func (e *mappedScopedEnvironment) SetSubscriptionId(id string) {
-	e.DotenvSet(SubscriptionIdEnvVarName, id)
-}
-
-func (e *mappedScopedEnvironment) GetTenantId() string {
-	return e.Getenv(TenantIdEnvVarName)
-}
-
-func (e *mappedScopedEnvironment) GetLocation() string {
-	return e.Getenv(LocationEnvVarName)
-}
-
-func (e *mappedScopedEnvironment) SetLocation(location string) {
-	e.DotenvSet(LocationEnvVarName, location)
-}
-
-func (e *mappedScopedEnvironment) GetServiceProperty(serviceName, propertyName string) string {
+func (e *inputEnvironment) GetServiceProperty(serviceName, propertyName string) string {
 	return e.Getenv(fmt.Sprintf("SERVICE_%s_%s", Key(serviceName), propertyName))
 }
 
-func (e *mappedScopedEnvironment) SetServiceProperty(serviceName, propertyName, value string) {
+func (e *inputEnvironment) SetServiceProperty(serviceName, propertyName, value string) {
 	e.DotenvSet(fmt.Sprintf("SERVICE_%s_%s", Key(serviceName), propertyName), value)
-}
-
-func (e *mappedScopedEnvironment) projectKey(key string) string {
-	if mapped, ok := e.aliases[key]; ok {
-		return mapped
-	}
-
-	return key
 }

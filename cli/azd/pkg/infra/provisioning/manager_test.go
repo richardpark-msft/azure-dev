@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning/test"
 	"github.com/azure/azure-dev/cli/azd/pkg/input"
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/azure/azure-dev/cli/azd/pkg/prompt"
 	"github.com/azure/azure-dev/cli/azd/test/mocks"
 	"github.com/azure/azure-dev/cli/azd/test/mocks/mockaccount"
@@ -219,20 +222,6 @@ func TestManagerDestroyWithNegativeConfirmation(t *testing.T) {
 	require.Contains(t, mockContext.Console.Output(), "Are you sure you want to destroy?")
 }
 
-type mappedOutputEnvironment struct {
-	environment.ScopedEnvironment
-	logicalKey  string
-	physicalKey string
-}
-
-func (e *mappedOutputEnvironment) DotenvDelete(key string) {
-	if key == e.logicalKey {
-		key = e.physicalKey
-	}
-
-	e.ScopedEnvironment.DotenvDelete(key)
-}
-
 type destroyResultProvider struct {
 	provisioning.Provider
 	result *provisioning.DestroyResult
@@ -244,7 +233,7 @@ type mappedEnvironmentProvider struct {
 	initializedInput string
 }
 
-type aliasTestProvider struct {
+type variableTestProvider struct {
 	provisioning.Provider
 	options    provisioning.Options
 	parameters []provisioning.Parameter
@@ -254,37 +243,445 @@ type aliasTestProvider struct {
 	err        error
 }
 
-func (p *aliasTestProvider) Initialize(_ context.Context, _ string, options provisioning.Options) error {
+func (p *variableTestProvider) Initialize(_ context.Context, _ string, options provisioning.Options) error {
 	p.options = options
 	return nil
 }
 
-func (p *aliasTestProvider) Parameters(context.Context) ([]provisioning.Parameter, error) {
+func (p *variableTestProvider) Parameters(context.Context) ([]provisioning.Parameter, error) {
 	return p.parameters, p.err
 }
 
-func (p *aliasTestProvider) PlannedOutputs(context.Context) ([]provisioning.PlannedOutput, error) {
+func (p *variableTestProvider) PlannedOutputs(context.Context) ([]provisioning.PlannedOutput, error) {
 	return p.outputs, p.err
 }
 
-func (p *aliasTestProvider) State(
+func (p *variableTestProvider) State(
 	context.Context, *provisioning.StateOptions,
 ) (*provisioning.StateResult, error) {
 	return p.state, p.err
 }
 
-func (p *aliasTestProvider) Deploy(context.Context) (*provisioning.DeployResult, error) {
+func (p *variableTestProvider) Deploy(context.Context) (*provisioning.DeployResult, error) {
 	return &provisioning.DeployResult{Deployment: p.deployment}, p.err
+}
+
+type providerScopeMarker int
+
+type localInputOperationsProvider struct {
+	variableTestProvider
+	env environment.ScopedEnvironment
+}
+
+func (p *localInputOperationsProvider) Deploy(ctx context.Context) (*provisioning.DeployResult, error) {
+	p.env.DotenvSet("LOCAL_PATH", "provider-local-path")
+	p.env.DotenvDelete("REMOVED_INPUT")
+	return p.variableTestProvider.Deploy(ctx)
+}
+
+type operationsUploadRecorder struct {
+	calls        int
+	subscription string
+	shareURL     string
+	source       string
+}
+
+func (r *operationsUploadRecorder) UploadPath(
+	_ context.Context, subscription, shareURL, source string,
+) error {
+	r.calls++
+	r.subscription, r.shareURL, r.source = subscription, shareURL, source
+	return nil
+}
+
+func writeOperationsFile(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "azd.operations.yaml"), []byte(`operations:
+  - type: FileShareUpload
+    config:
+      storageAccount: ${LOCAL_STORAGE}
+      fileShareName: ${LOCAL_SHARE}${REMOVED_INPUT}
+      path: ${LOCAL_PATH}
+`), 0600))
+	return dir
+}
+
+func TestManagerOperations_UsesLocalInputsAndRawOutputs(t *testing.T) {
+	t.Setenv("AZD_ALPHA_ENABLE_AZD_OPERATIONS", "true")
+	t.Setenv("REMOVED_INPUT", "ambient-value-must-not-return")
+
+	mockContext := mocks.NewMockContext(t.Context())
+	projectEnv := environment.NewWithValues("test", map[string]string{
+		environment.SubscriptionIdEnvVarName: "shared-subscription",
+		"LOCAL_STORAGE":                      "unrelated-account",
+		"PROJECT_STORAGE":                    "old-account",
+		"LOCAL_SHARE":                        "shared-share",
+		"LOCAL_PATH":                         "shared-path",
+		"REMOVED_INPUT":                      "backing-value-must-not-return",
+		"PROJECT_SHARE":                      "resolved-share",
+	})
+	mockContext.Container.MustRegisterSingleton(func() environment.ScopedEnvironment { return projectEnv })
+	var provider *localInputOperationsProvider
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Bicep),
+		func(env environment.ScopedEnvironment) provisioning.Provider {
+			provider = &localInputOperationsProvider{env: env, variableTestProvider: variableTestProvider{
+				deployment: &provisioning.Deployment{Outputs: map[string]provisioning.OutputParameter{
+					"LOCAL_STORAGE": {Type: provisioning.ParameterTypeString, Value: "returned-account"},
+				}},
+			}}
+			return provider
+		})
+	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", mock.Anything, projectEnv).Return(nil).Once()
+	uploads := &operationsUploadRecorder{}
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, envManager, projectEnv,
+		mockContext.Console, mockContext.AlphaFeaturesManager, uploads, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Bicep, Path: writeOperationsFile(t),
+		Env: osutil.ExpandableMap{
+			"LOCAL_STORAGE": osutil.NewExpandableString("input-account"),
+			"LOCAL_SHARE":   osutil.NewExpandableString("${PROJECT_SHARE}"),
+			"LOCAL_PATH":    osutil.NewExpandableString("initial-local-path"),
+			"REMOVED_INPUT": osutil.NewExpandableString("removed-during-deploy"),
+		},
+		Outputs: map[string]string{"LOCAL_STORAGE": "PROJECT_STORAGE"},
+	}))
+	projectEnv.DotenvSet("PROJECT_SHARE", "changed-after-initialize")
+
+	result, err := manager.Deploy(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, &operationsUploadRecorder{
+		calls: 1, subscription: "shared-subscription",
+		shareURL: "https://returned-account.file.core.windows.net/resolved-share",
+		source:   "provider-local-path",
+	}, uploads)
+
+	require.Equal(t, "input-account", provider.env.Getenv("LOCAL_STORAGE"),
+		"operations must not replace the provider's input with its returned output")
+	require.Equal(t, "resolved-share", provider.env.Getenv("LOCAL_SHARE"),
+		"input expressions must not be re-evaluated after initialization")
+	require.Equal(t, "provider-local-path", provider.env.Getenv("LOCAL_PATH"))
+	_, present := provider.env.LookupEnv("REMOVED_INPUT")
+	require.False(t, present)
+
+	require.Equal(t, "returned-account", projectEnv.Getenv("PROJECT_STORAGE"))
+	require.Equal(t, "unrelated-account", projectEnv.Getenv("LOCAL_STORAGE"))
+	require.Equal(t, "shared-share", projectEnv.Getenv("LOCAL_SHARE"))
+	require.Equal(t, "shared-path", projectEnv.Getenv("LOCAL_PATH"))
+	require.Equal(t, "backing-value-must-not-return", projectEnv.Getenv("REMOVED_INPUT"))
+	require.Contains(t, result.Deployment.Outputs, "LOCAL_STORAGE")
+	require.NotContains(t, result.Deployment.Outputs, "PROJECT_STORAGE")
+	envManager.AssertExpectations(t)
+}
+
+func TestManagerOperations_UsesStagedOutputs(t *testing.T) {
+	t.Setenv("AZD_ALPHA_ENABLE_AZD_OPERATIONS", "true")
+	t.Setenv("REMOVED_INPUT", "ambient-value-must-not-return")
+
+	mockContext := mocks.NewMockContext(t.Context())
+	projectEnv := environment.NewWithValues("test", map[string]string{
+		environment.SubscriptionIdEnvVarName: "shared-subscription",
+		"LOCAL_STORAGE":                      "unrelated-account",
+		"PROJECT_STORAGE":                    "old-account",
+		"LOCAL_SHARE":                        "shared-share",
+		"LOCAL_PATH":                         "shared-path",
+		"REMOVED_INPUT":                      "backing-value-must-not-return",
+		"PROJECT_SHARE":                      "snapshot-share",
+	})
+	stagedEnv := environment.NewWithValues(projectEnv.Name(), projectEnv.Dotenv())
+	projectEnv.DotenvSet("PROJECT_SHARE", "live-share")
+
+	mockContext.Container.MustRegisterSingleton(func() environment.ScopedEnvironment { return projectEnv })
+	var provider *localInputOperationsProvider
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Bicep),
+		func(env environment.ScopedEnvironment) provisioning.Provider {
+			provider = &localInputOperationsProvider{env: env, variableTestProvider: variableTestProvider{
+				deployment: &provisioning.Deployment{Outputs: map[string]provisioning.OutputParameter{
+					"LOCAL_STORAGE": {Type: provisioning.ParameterTypeString, Value: "returned-account"},
+				}},
+			}}
+			return provider
+		})
+	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", mock.Anything, stagedEnv).Return(nil).Once()
+	uploads := &operationsUploadRecorder{}
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, envManager, stagedEnv,
+		mockContext.Console, mockContext.AlphaFeaturesManager, uploads, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Bicep, Path: writeOperationsFile(t),
+		Env: osutil.ExpandableMap{
+			"LOCAL_STORAGE": osutil.NewExpandableString("input-account"),
+			"LOCAL_SHARE":   osutil.NewExpandableString("${PROJECT_SHARE}"),
+			"LOCAL_PATH":    osutil.NewExpandableString("initial-local-path"),
+			"REMOVED_INPUT": osutil.NewExpandableString("removed-during-deploy"),
+		},
+		Outputs: map[string]string{"LOCAL_STORAGE": "PROJECT_STORAGE"},
+	}))
+
+	result, err := manager.Deploy(t.Context())
+	require.NoError(t, err)
+
+	require.Same(t, projectEnv, provider.env.BackingEnv())
+	require.Equal(t, "live-share", provider.env.Getenv("LOCAL_SHARE"),
+		"provider inputs must resolve from the live environment, not the output-staging snapshot")
+	require.Equal(t, &operationsUploadRecorder{
+		calls: 1, subscription: "shared-subscription",
+		shareURL: "https://returned-account.file.core.windows.net/live-share",
+		source:   "provider-local-path",
+	}, uploads)
+
+	require.Equal(t, "returned-account", stagedEnv.Getenv("PROJECT_STORAGE"))
+	require.Equal(t, "old-account", projectEnv.Getenv("PROJECT_STORAGE"))
+	require.Equal(t, "unrelated-account", stagedEnv.Getenv("LOCAL_STORAGE"))
+	require.Equal(t, "unrelated-account", projectEnv.Getenv("LOCAL_STORAGE"))
+	require.Equal(t, "shared-path", stagedEnv.Getenv("LOCAL_PATH"))
+	require.Equal(t, "shared-path", projectEnv.Getenv("LOCAL_PATH"))
+	require.Equal(t, "backing-value-must-not-return", stagedEnv.Getenv("REMOVED_INPUT"))
+	require.Equal(t, "backing-value-must-not-return", projectEnv.Getenv("REMOVED_INPUT"))
+	require.Contains(t, result.Deployment.Outputs, "LOCAL_STORAGE")
+	require.NotContains(t, result.Deployment.Outputs, "PROJECT_STORAGE")
+	envManager.AssertExpectations(t)
+}
+
+func TestManagerOperations_CustomProviderMapsOutputs(t *testing.T) {
+	t.Setenv("AZD_ALPHA_ENABLE_AZD_OPERATIONS", "true")
+
+	mockContext := mocks.NewMockContext(t.Context())
+	projectEnv := environment.NewWithValues("test", map[string]string{
+		environment.SubscriptionIdEnvVarName: "shared-subscription",
+		"LOCAL_STORAGE":                      "unrelated-account",
+		"PROJECT_STORAGE":                    "old-account",
+		"LOCAL_SHARE":                        "shared-share",
+		"LOCAL_PATH":                         "shared-path",
+		"REMOVED_INPUT":                      "",
+	})
+	mockContext.Container.MustRegisterSingleton(func() environment.ScopedEnvironment { return projectEnv })
+	var providerEnv environment.ScopedEnvironment
+	mockContext.Container.MustRegisterNamedTransient("custom.operations",
+		func(env environment.ScopedEnvironment) provisioning.Provider {
+			providerEnv = env
+			return &variableTestProvider{deployment: &provisioning.Deployment{
+				Outputs: map[string]provisioning.OutputParameter{
+					"LOCAL_STORAGE": {Type: provisioning.ParameterTypeString, Value: "returned-account"},
+				},
+			}}
+		})
+	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", mock.Anything, projectEnv).Return(nil).Once()
+	uploads := &operationsUploadRecorder{}
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, envManager, projectEnv,
+		mockContext.Console, mockContext.AlphaFeaturesManager, uploads, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: "custom.operations", Path: writeOperationsFile(t),
+		Outputs: map[string]string{"LOCAL_STORAGE": "PROJECT_STORAGE"},
+	}))
+	require.Same(t, projectEnv, providerEnv, "output-only providers must not receive an input overlay")
+
+	result, err := manager.Deploy(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, &operationsUploadRecorder{
+		calls: 1, subscription: "shared-subscription",
+		shareURL: "https://returned-account.file.core.windows.net/shared-share",
+		source:   "shared-path",
+	}, uploads)
+	require.Equal(t, "returned-account", projectEnv.Getenv("PROJECT_STORAGE"))
+	require.Equal(t, "unrelated-account", providerEnv.Getenv("LOCAL_STORAGE"),
+		"publishing an output must not redirect provider reads")
+	require.Equal(t, "shared-share", projectEnv.Getenv("LOCAL_SHARE"))
+	require.Equal(t, "shared-path", projectEnv.Getenv("LOCAL_PATH"))
+	require.Contains(t, result.Deployment.Outputs, "LOCAL_STORAGE")
+	require.NotContains(t, result.Deployment.Outputs, "PROJECT_STORAGE")
+	envManager.AssertExpectations(t)
+}
+
+func TestManagerRejectsPromptedEnvInputsForCI(t *testing.T) {
+	t.Parallel()
+
+	for _, expression := range []string{"${PROJECT_INPUT}", "prefix-${FIRST}-${SECOND}", "literal"} {
+		t.Run(expression, func(t *testing.T) {
+			t.Parallel()
+			mockContext := mocks.NewMockContext(t.Context())
+			provider := &variableTestProvider{parameters: []provisioning.Parameter{{
+				Name: "requiredInput", Value: "prompted-value-must-not-be-disclosed",
+				EnvVarMapping: []string{"LOCAL_INPUT"}, LocalPrompt: true,
+			}}}
+			mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
+				return provider
+			})
+			manager := provisioning.NewManager(
+				mockContext.Container, defaultProvider, nil, environment.New("test"),
+				mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+			)
+			require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+				Provider: provisioning.Bicep,
+				Env:      osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString(expression)},
+			}))
+
+			parameters, err := manager.Parameters(t.Context())
+			require.ErrorContains(t, err, "requiredInput")
+			require.ErrorContains(t, err, "local prompt")
+			require.ErrorContains(t, err, "CI")
+			require.ErrorContains(t, err, "env")
+			require.NotContains(t, err.Error(), "prompted-value-must-not-be-disclosed")
+			require.Nil(t, parameters)
+			require.True(t, provider.parameters[0].LocalPrompt)
+			require.Equal(t, "prompted-value-must-not-be-disclosed", provider.parameters[0].Value)
+		})
+	}
+}
+
+type providerScopeProbe struct {
+	provisioning.Provider
+	env     environment.ScopedEnvironment
+	console input.Console
+	marker  *providerScopeMarker
+}
+
+func (*providerScopeProbe) Initialize(context.Context, string, provisioning.Options) error {
+	return nil
+}
+
+func TestManagerKeepsPromptedParametersWithoutEnvOverrides(t *testing.T) {
+	t.Parallel()
+
+	provider := &variableTestProvider{parameters: []provisioning.Parameter{{
+		Name: "ordinaryInput", Value: "prompted-value",
+		EnvVarMapping: []string{"ORDINARY_INPUT"}, LocalPrompt: true,
+	}}}
+	mockContext := mocks.NewMockContext(t.Context())
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
+		return provider
+	})
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, nil, environment.New("test"),
+		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Bicep,
+		Env:      osutil.ExpandableMap{"OTHER_INPUT": osutil.NewExpandableString("literal")},
+	}))
+
+	parameters, err := manager.Parameters(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, provider.parameters, parameters)
+}
+
+func TestUpdateEnvironmentSerializesOutputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		output  provisioning.OutputParameter
+		want    string
+		wantErr bool
+	}{
+		{name: "string", output: provisioning.OutputParameter{
+			Type: provisioning.ParameterTypeString, Value: "value"}, want: "value"},
+		{name: "number", output: provisioning.OutputParameter{
+			Type: provisioning.ParameterTypeNumber, Value: 42}, want: "42"},
+		{name: "boolean", output: provisioning.OutputParameter{
+			Type: provisioning.ParameterTypeBoolean, Value: true}, want: "true"},
+		{name: "array", output: provisioning.OutputParameter{
+			Type: provisioning.ParameterTypeArray, Value: []any{"a", 1}}, want: `["a",1]`},
+		{name: "object", output: provisioning.OutputParameter{
+			Type: provisioning.ParameterTypeObject, Value: map[string]any{"key": "value"}}, want: `{"key":"value"}`},
+		{name: "invalid object", output: provisioning.OutputParameter{
+			Type: provisioning.ParameterTypeObject, Value: make(chan int)}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := environment.NewWithValues("test", map[string]string{"OUTPUT": "original"})
+			manager := &mockenv.MockEnvManager{}
+			if !tt.wantErr {
+				manager.On("Save", mock.Anything, env).Return(nil).Once()
+			}
+			err := provisioning.UpdateEnvironment(t.Context(), map[string]provisioning.OutputParameter{
+				"OUTPUT": tt.output,
+			}, env, manager)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "invalid value for output parameter 'OUTPUT'")
+				require.Equal(t, "original", env.Getenv("OUTPUT"))
+				manager.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.want, env.Getenv("OUTPUT"))
+			}
+			manager.AssertExpectations(t)
+		})
+	}
+}
+
+func TestManagerProviderOverlayPreservesCommandScope(t *testing.T) {
+	t.Parallel()
+
+	for _, inputs := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inputs=%t", inputs), func(t *testing.T) {
+			t.Parallel()
+
+			mockContext := mocks.NewMockContext(t.Context())
+			backing := environment.NewWithValues("test", map[string]string{"PROJECT_INPUT": "value"})
+			mockContext.Container.MustRegisterSingleton(func() environment.ScopedEnvironment {
+				return backing
+			})
+			mockContext.Container.MustRegisterScoped(func() *providerScopeMarker {
+				return new(providerScopeMarker)
+			})
+
+			var commandMarker *providerScopeMarker
+			require.NoError(t, mockContext.Container.Resolve(&commandMarker))
+
+			var provider *providerScopeProbe
+			mockContext.Container.MustRegisterNamedTransient(string(provisioning.Bicep), func(
+				env environment.ScopedEnvironment,
+				console input.Console,
+				marker *providerScopeMarker,
+			) provisioning.Provider {
+				provider = &providerScopeProbe{env: env, console: console, marker: marker}
+				return provider
+			})
+
+			manager := provisioning.NewManager(
+				mockContext.Container, defaultProvider, nil, backing,
+				mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+			)
+			options := provisioning.Options{Provider: provisioning.Bicep}
+			if inputs {
+				options.Env = osutil.ExpandableMap{"PROVIDER_INPUT": osutil.NewExpandableString("${PROJECT_INPUT}")}
+			}
+
+			require.NoError(t, manager.Initialize(t.Context(), "", options))
+			require.Same(t, commandMarker, provider.marker)
+			require.Same(t, mockContext.Console, provider.console)
+			require.Same(t, backing, provider.env.BackingEnv())
+			if inputs {
+				require.Equal(t, "value", provider.env.Getenv("PROVIDER_INPUT"))
+			} else {
+				require.Same(t, backing, provider.env)
+			}
+		})
+	}
 }
 
 func TestManagerPipelineMetadataUsesProjectView(t *testing.T) {
 	t.Parallel()
 
-	provider := &aliasTestProvider{
+	provider := &variableTestProvider{
 		parameters: []provisioning.Parameter{
 			{Name: "plain", Value: "value", EnvVarMapping: []string{"PROVIDER_VARIABLE", "UNCHANGED"},
 				UsingEnvVarMapping: true},
-			{Name: "secret", Secret: true, Value: "secret", EnvVarMapping: []string{"PROVIDER_VARIABLE"}, LocalPrompt: true},
+			{Name: "secret", Secret: true, Value: "secret", EnvVarMapping: []string{"PROVIDER_VARIABLE"},
+				UsingEnvVarMapping: true},
 			{Name: "overlapping", EnvVarMapping: []string{"PROJECT_VARIABLE"}},
 			{Name: "unmapped"},
 		},
@@ -300,8 +697,11 @@ func TestManagerPipelineMetadataUsesProjectView(t *testing.T) {
 	)
 	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
 		Provider: provisioning.Bicep,
-		// PROJECT_VARIABLE is also a provider-view name here; each alias must be applied only once.
-		Aliases: map[string]string{
+		Env: osutil.ExpandableMap{
+			"PROVIDER_VARIABLE": osutil.NewExpandableString("${PROJECT_VARIABLE}"),
+			"PROJECT_VARIABLE":  osutil.NewExpandableString("${OTHER_PROJECT_VARIABLE}"),
+		},
+		Outputs: map[string]string{
 			"PROVIDER_VARIABLE": "PROJECT_VARIABLE",
 			"PROJECT_VARIABLE":  "OTHER_PROJECT_VARIABLE",
 		},
@@ -310,9 +710,9 @@ func TestManagerPipelineMetadataUsesProjectView(t *testing.T) {
 	parameters, err := manager.Parameters(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, []provisioning.Parameter{
-		{Name: "plain", Value: "value", EnvVarMapping: []string{"PROJECT_VARIABLE", "UNCHANGED"},
+		{Name: "plain", EnvVarMapping: []string{"PROJECT_VARIABLE", "UNCHANGED"},
 			UsingEnvVarMapping: true},
-		{Name: "secret", Secret: true, Value: "secret", EnvVarMapping: []string{"PROJECT_VARIABLE"}, LocalPrompt: true},
+		{Name: "secret", Secret: true, EnvVarMapping: []string{"PROJECT_VARIABLE"}, UsingEnvVarMapping: true},
 		{Name: "overlapping", EnvVarMapping: []string{"OTHER_PROJECT_VARIABLE"}},
 		{Name: "unmapped"},
 	}, parameters)
@@ -344,7 +744,6 @@ func TestManagerPipelineMetadataUsesProjectView(t *testing.T) {
 func TestManagerStateUsesProjectView(t *testing.T) {
 	t.Parallel()
 
-	const customProvider = provisioning.ProviderKind("contoso.custom")
 	providerState := &provisioning.StateResult{State: &provisioning.State{
 		Outputs: map[string]provisioning.OutputParameter{
 			"FIRST":  {Type: provisioning.ParameterTypeString, Value: "one"},
@@ -352,9 +751,9 @@ func TestManagerStateUsesProjectView(t *testing.T) {
 		},
 		Resources: []provisioning.Resource{{Id: "resource-id"}},
 	}}
-	provider := &aliasTestProvider{state: providerState}
+	provider := &variableTestProvider{state: providerState}
 	mockContext := mocks.NewMockContext(t.Context())
-	mockContext.Container.MustRegisterNamedSingleton(string(customProvider), func() provisioning.Provider {
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
 		return provider
 	})
 	manager := provisioning.NewManager(
@@ -363,8 +762,8 @@ func TestManagerStateUsesProjectView(t *testing.T) {
 	)
 
 	err := manager.Initialize(t.Context(), "", provisioning.Options{
-		Provider: customProvider,
-		Aliases:  map[string]string{"FIRST": "SECOND", "SECOND": "SHARED"},
+		Provider: provisioning.Bicep,
+		Outputs:  map[string]string{"FIRST": "SECOND", "SECOND": "SHARED"},
 	})
 	require.NoError(t, err)
 
@@ -382,10 +781,159 @@ func TestManagerStateUsesProjectView(t *testing.T) {
 	}, providerState.State.Outputs)
 }
 
-func TestManagerVirtualInputsUseProviderView(t *testing.T) {
+func TestManagerRejectsEnvForCustomProviders(t *testing.T) {
 	t.Parallel()
 
-	provider := &aliasTestProvider{}
+	const customProvider = provisioning.ProviderKind("contoso.custom")
+	tests := []struct {
+		name            string
+		provider        provisioning.ProviderKind
+		defaultProvider provisioning.DefaultProviderResolver
+	}{
+		{name: "explicit", provider: customProvider, defaultProvider: defaultProvider},
+		{
+			name:     "resolved default",
+			provider: provisioning.NotSpecified,
+			defaultProvider: func() (provisioning.ProviderKind, error) {
+				return customProvider, nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mockContext := mocks.NewMockContext(t.Context())
+			manager := provisioning.NewManager(
+				mockContext.Container, tt.defaultProvider, nil, environment.New("test"),
+				mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+			)
+
+			err := manager.Initialize(t.Context(), "", provisioning.Options{
+				Provider: tt.provider,
+				Env:      osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${PROJECT_INPUT}")},
+			})
+
+			require.ErrorContains(t, err, `provider "contoso.custom" is not supported`)
+		})
+	}
+}
+
+func TestManagerCustomProvidersSupportOutputsWithoutInputEnvironment(t *testing.T) {
+	t.Parallel()
+
+	const kind = provisioning.ProviderKind("contoso.custom")
+	backing := environment.NewWithValues("test", map[string]string{"LOCAL_OUTPUT": "existing"})
+	provider := &variableTestProvider{
+		state: &provisioning.StateResult{State: &provisioning.State{
+			Outputs: map[string]provisioning.OutputParameter{
+				"LOCAL_OUTPUT": {Type: provisioning.ParameterTypeString, Value: "returned"},
+			},
+		}},
+		parameters: []provisioning.Parameter{{
+			Name: "name", Value: "input-value", EnvVarMapping: []string{"LOCAL_OUTPUT"}, UsingEnvVarMapping: true,
+		}},
+	}
+	provider.deployment = &provisioning.Deployment{Outputs: provider.state.State.Outputs}
+	mockContext := mocks.NewMockContext(t.Context())
+	mockContext.Container.MustRegisterNamedSingleton(string(kind), func() provisioning.Provider { return provider })
+	envManager := &mockenv.MockEnvManager{}
+	envManager.On("Save", mock.Anything, backing).Return(nil).Once()
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, envManager, backing,
+		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: kind, Outputs: map[string]string{"LOCAL_OUTPUT": "PROJECT_OUTPUT"},
+	}))
+
+	parameters, err := manager.Parameters(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, provider.parameters, parameters, "output mappings must not rename input metadata")
+	state, err := manager.State(t.Context(), nil)
+	require.NoError(t, err)
+	require.Contains(t, state.State.Outputs, "PROJECT_OUTPUT")
+	_, err = manager.Deploy(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "returned", backing.Getenv("PROJECT_OUTPUT"))
+	require.Equal(t, "existing", backing.Getenv("LOCAL_OUTPUT"))
+	envManager.AssertExpectations(t)
+}
+
+func TestManagerResolvesEnvOnceWithoutPersistingInputs(t *testing.T) {
+	t.Setenv("PROCESS_SOURCE", "from-process")
+	t.Setenv("TEST_SOURCE_NOT_SET", "")
+	t.Setenv("MISSING_INPUT", "must-not-fall-back")
+	mockContext := mocks.NewMockContext(t.Context())
+	backing := environment.NewWithValues("test", map[string]string{
+		"HOST": "original-host", "NAME": "orders", "LOCAL_INPUT": "original-local",
+		"SOURCE": "source-value", "CHAIN": "project-chain",
+		"UNEXPANDED_SOURCE": "${HOST}",
+	})
+	mockContext.Container.MustRegisterSingleton(func() environment.ScopedEnvironment { return backing })
+	var provider *mappedEnvironmentProvider
+	mockContext.Container.MustRegisterNamedTransient(string(provisioning.Bicep),
+		func(env environment.ScopedEnvironment) provisioning.Provider {
+			provider = &mappedEnvironmentProvider{env: env}
+			return provider
+		})
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, nil, backing,
+		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Bicep,
+		Env: osutil.ExpandableMap{
+			"LOCAL_INPUT":   osutil.NewExpandableString("Server=${HOST};Database=${NAME}"),
+			"DUPLICATE":     osutil.NewExpandableString("${HOST}"),
+			"CHAIN":         osutil.NewExpandableString("${SOURCE}"),
+			"NO_CHAIN":      osutil.NewExpandableString("${CHAIN}"),
+			"MISSING":       osutil.NewExpandableString("${TEST_SOURCE_NOT_SET:-default}"),
+			"MISSING_INPUT": osutil.NewExpandableString("${TEST_SOURCE_NOT_SET}"),
+			"EMPTY":         osutil.NewExpandableString(""),
+			"PROCESS":       osutil.NewExpandableString("${PROCESS_SOURCE}"),
+			"LITERAL":       osutil.NewExpandableString("literal"),
+			"NO_RECURSE":    osutil.NewExpandableString("${UNEXPANDED_SOURCE}"),
+		},
+	}))
+	env := provider.env
+	require.Equal(t, "Server=original-host;Database=orders", provider.initializedInput)
+	require.Equal(t, "original-host", env.Getenv("DUPLICATE"))
+	require.Equal(t, "source-value", env.Getenv("CHAIN"))
+	require.Equal(t, "project-chain", env.Getenv("NO_CHAIN"), "env entries do not expand through each other")
+	require.Equal(t, "default", env.Getenv("MISSING"))
+	missingValue, missingPresent := env.LookupEnv("MISSING_INPUT")
+	require.True(t, missingPresent)
+	require.Empty(t, missingValue)
+	require.Equal(t, "from-process", env.Getenv("PROCESS"))
+	require.Equal(t, "literal", env.Getenv("LITERAL"))
+	require.Equal(t, "${HOST}", env.Getenv("NO_RECURSE"))
+	value, present := env.LookupEnv("EMPTY")
+	require.True(t, present)
+	require.Empty(t, value)
+
+	backing.DotenvSet("HOST", "new-host")
+	require.Equal(t, "Server=original-host;Database=orders", env.Getenv("LOCAL_INPUT"))
+	env.DotenvSet("LOCAL_INPUT", "local-write")
+	require.Equal(t, "local-write", env.Getenv("LOCAL_INPUT"))
+	require.Equal(t, "original-local", backing.Getenv("LOCAL_INPUT"))
+	require.Equal(t, "new-host", backing.Getenv("HOST"))
+	env.DotenvDelete("LOCAL_INPUT")
+	_, present = env.LookupEnv("LOCAL_INPUT")
+	require.False(t, present)
+	require.Equal(t, "original-local", backing.Getenv("LOCAL_INPUT"))
+}
+
+func TestManagerPipelineExpressionsExportSources(t *testing.T) {
+	t.Parallel()
+
+	provider := &variableTestProvider{parameters: []provisioning.Parameter{
+		{Name: "connection", Value: "Server=host;Database=orders", Secret: true,
+			EnvVarMapping: []string{"CONNECTION"}, UsingEnvVarMapping: true},
+		{Name: "literal", Value: "fixed", EnvVarMapping: []string{"LITERAL"}, UsingEnvVarMapping: true},
+		{Name: "default", Value: "fallback", EnvVarMapping: []string{"DEFAULTED"}, UsingEnvVarMapping: true},
+	}}
 	mockContext := mocks.NewMockContext(t.Context())
 	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
 		return provider
@@ -394,21 +942,176 @@ func TestManagerVirtualInputsUseProviderView(t *testing.T) {
 		mockContext.Container, defaultProvider, nil, environment.New("test"),
 		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
 	)
-	virtualEnv := map[string]string{"FIRST": "first", "SECOND": "second", "UNCHANGED": "other"}
 	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
-		Provider:   provisioning.Bicep,
-		VirtualEnv: virtualEnv,
-		Aliases: map[string]string{
-			"FIRST": "SECOND", "SECOND": "FIRST", "LOCAL": "FIRST", "UNCHANGED": "MISSING",
+		Provider: provisioning.Bicep,
+		Env: osutil.ExpandableMap{
+			"CONNECTION": osutil.NewExpandableString("Server=${HOST};Database=${DB}"),
+			"LITERAL":    osutil.NewExpandableString("fixed"),
+			"DEFAULTED":  osutil.NewExpandableString("${PRIMARY:-${FALLBACK}}"),
+		},
+	}))
+	parameters, err := manager.Parameters(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"DB", "HOST"}, parameters[0].EnvVarMapping)
+	require.Nil(t, parameters[0].Value)
+	require.True(t, parameters[0].Secret)
+	require.Empty(t, parameters[1].EnvVarMapping)
+	require.Nil(t, parameters[1].Value)
+	require.Equal(t, []string{"FALLBACK", "PRIMARY"}, parameters[2].EnvVarMapping)
+	require.Equal(t, "Server=host;Database=orders", provider.parameters[0].Value)
+}
+
+func TestManagerEnvSourcesWithoutProviderMetadata(t *testing.T) {
+	t.Parallel()
+
+	provider := &variableTestProvider{}
+	mockContext := mocks.NewMockContext(t.Context())
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Terraform), func() provisioning.Provider {
+		return provider
+	})
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, nil, environment.New("test"),
+		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Terraform,
+		Env: osutil.ExpandableMap{
+			"CONNECTION": osutil.NewExpandableString("${HOST}/${DATABASE}"),
+			"LITERAL":    osutil.NewExpandableString("literal"),
 		},
 	}))
 
-	require.Equal(t, map[string]string{"FIRST": "second", "SECOND": "first", "LOCAL": "first"},
-		provider.options.VirtualEnv)
-	require.Equal(t, map[string]string{"FIRST": "first", "SECOND": "second", "UNCHANGED": "other"}, virtualEnv)
+	parameters, err := manager.Parameters(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []provisioning.Parameter{{
+		Name: "env.CONNECTION", Secret: true, EnvVarMapping: []string{"DATABASE", "HOST"}, UsingEnvVarMapping: true,
+	}}, parameters)
 }
 
-func TestManagerDeployValidatesOutputAliasDestinations(t *testing.T) {
+func TestManagerPipelineDoesNotExportEarlierLayerOutputs(t *testing.T) {
+	t.Parallel()
+
+	for _, withMetadata := range []bool{false, true} {
+		t.Run(fmt.Sprintf("metadata=%t", withMetadata), func(t *testing.T) {
+			t.Parallel()
+			provider := &variableTestProvider{}
+			if withMetadata {
+				provider.parameters = []provisioning.Parameter{{
+					Name: "input", EnvVarMapping: []string{"LOCAL_INPUT"},
+				}}
+			}
+			mockContext := mocks.NewMockContext(t.Context())
+			mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
+				return provider
+			})
+			manager := provisioning.NewManager(
+				mockContext.Container, defaultProvider, nil, environment.New("test"),
+				mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+			)
+			require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+				Provider:   provisioning.Bicep,
+				VirtualEnv: map[string]string{"EARLIER_OUTPUT": ""},
+				Env: osutil.ExpandableMap{
+					"LOCAL_INPUT": osutil.NewExpandableString("${EARLIER_OUTPUT}/${CONFIG_INPUT}"),
+				},
+			}))
+			require.Contains(t, provider.options.VirtualEnv, "LOCAL_INPUT")
+			parameters, err := manager.Parameters(t.Context())
+			require.NoError(t, err)
+			require.Len(t, parameters, 1)
+			require.Equal(t, []string{"CONFIG_INPUT"}, parameters[0].EnvVarMapping)
+			require.Nil(t, parameters[0].Value)
+		})
+	}
+}
+
+func TestManagerRejectsReservedVariables(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		aliases map[string]string
+		wantErr string
+	}{
+		{
+			name: "provider deployment context",
+			aliases: map[string]string{
+				environment.SubscriptionIdEnvVarName: "PROJECT_SUBSCRIPTION",
+			},
+			wantErr: `provider output variable "AZURE_SUBSCRIPTION_ID" is reserved by azd`,
+		},
+		{
+			name: "project deployment context",
+			aliases: map[string]string{
+				"PROVIDER_LOCATION": environment.LocationEnvVarName,
+			},
+			wantErr: `project output variable "AZURE_LOCATION" is reserved by azd`,
+		},
+		{
+			name: "provider control variable",
+			aliases: map[string]string{
+				"azd_internal_control": "PROJECT_VALUE",
+			},
+			wantErr: `provider output variable "azd_internal_control" is reserved by azd`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mockContext := mocks.NewMockContext(t.Context())
+			manager := provisioning.NewManager(
+				mockContext.Container, defaultProvider, nil, environment.New("test"),
+				mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+			)
+
+			err := manager.Initialize(t.Context(), "", provisioning.Options{
+				Provider: provisioning.Bicep,
+				Outputs:  tt.aliases,
+			})
+
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestManagerVirtualInputsUseProviderView(t *testing.T) {
+	t.Parallel()
+
+	provider := &variableTestProvider{}
+	mockContext := mocks.NewMockContext(t.Context())
+	mockContext.Container.MustRegisterNamedSingleton(string(provisioning.Bicep), func() provisioning.Provider {
+		return provider
+	})
+	manager := provisioning.NewManager(
+		mockContext.Container, defaultProvider, nil, environment.New("test"),
+		mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
+	)
+	virtualEnv := map[string]string{
+		"FIRST": "first", "SECOND": "second", "THIRD": "third", "UNCHANGED": "other",
+	}
+	require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
+		Provider:   provisioning.Bicep,
+		VirtualEnv: virtualEnv,
+		Env: osutil.ExpandableMap{
+			"FIRST":     osutil.NewExpandableString("${SECOND}"),
+			"SECOND":    osutil.NewExpandableString("${FIRST}"),
+			"LOCAL":     osutil.NewExpandableString("${THIRD}"),
+			"UNCHANGED": osutil.NewExpandableString("${MISSING}"),
+		},
+	}))
+
+	require.Equal(t, map[string]string{
+		"FIRST": "", "SECOND": "", "THIRD": "third", "LOCAL": "",
+	},
+		provider.options.VirtualEnv)
+	require.Equal(t, map[string]string{
+		"FIRST": "first", "SECOND": "second", "THIRD": "third", "UNCHANGED": "other",
+	}, virtualEnv)
+}
+
+func TestManagerDeployValidatesOutputMappings(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -418,19 +1121,15 @@ func TestManagerDeployValidatesOutputAliasDestinations(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "collision with unaliased output", aliases: map[string]string{"FIRST": "SECOND"},
+			name: "collision with unmapped output", aliases: map[string]string{"FIRST": "SECOND"},
 			wantErr: `provider outputs "FIRST" and "SECOND" both target project variable "SECOND"`,
 		},
 		{
-			name: "duplicate explicit destinations", aliases: map[string]string{"FIRST": "SHARED", "SECOND": "SHARED"},
-			wantErr: `provider outputs "FIRST" and "SECOND" both target project variable "SHARED"`,
-		},
-		{
-			name: "overlapping aliases applied once", aliases: map[string]string{"FIRST": "SECOND", "SECOND": "SHARED"},
+			name: "overlapping output mappings applied once", aliases: map[string]string{"FIRST": "SECOND", "SECOND": "SHARED"},
 			want: map[string]string{"FIRST": "old-first", "SECOND": "one", "SHARED": "two"},
 		},
 		{
-			name: "identity alias", aliases: map[string]string{"FIRST": "FIRST"},
+			name: "identity output mapping", aliases: map[string]string{"FIRST": "FIRST"},
 			want: map[string]string{"FIRST": "one", "SECOND": "two", "SHARED": "old-shared"},
 		},
 	}
@@ -441,7 +1140,7 @@ func TestManagerDeployValidatesOutputAliasDestinations(t *testing.T) {
 			original := map[string]string{"FIRST": "old-first", "SECOND": "old-second", "SHARED": "old-shared"}
 			backing := environment.NewWithValues("test", original)
 			before := backing.Dotenv()
-			provider := &aliasTestProvider{deployment: &provisioning.Deployment{
+			provider := &variableTestProvider{deployment: &provisioning.Deployment{
 				Outputs: map[string]provisioning.OutputParameter{
 					"FIRST":  {Type: provisioning.ParameterTypeString, Value: "one"},
 					"SECOND": {Type: provisioning.ParameterTypeString, Value: "two"},
@@ -460,7 +1159,7 @@ func TestManagerDeployValidatesOutputAliasDestinations(t *testing.T) {
 				mockContext.Console, mockContext.AlphaFeaturesManager, nil, cloud.AzurePublic(),
 			)
 			require.NoError(t, manager.Initialize(t.Context(), "", provisioning.Options{
-				Provider: provisioning.Bicep, Aliases: tt.aliases,
+				Provider: provisioning.Bicep, Outputs: tt.aliases,
 			}))
 
 			result, err := manager.Deploy(t.Context())
@@ -509,8 +1208,8 @@ func (p *savingEnvironmentProvider) Deploy(ctx context.Context) (*provisioning.D
 func TestCompat_ProviderKeepsDirectEnvironmentAccess(t *testing.T) {
 	t.Parallel()
 
-	for _, aliases := range []bool{false, true} {
-		t.Run(fmt.Sprintf("aliases=%t", aliases), func(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%t", configured), func(t *testing.T) {
 			t.Parallel()
 
 			mockContext := mocks.NewMockContext(t.Context())
@@ -541,10 +1240,9 @@ func TestCompat_ProviderKeepsDirectEnvironmentAccess(t *testing.T) {
 				})
 
 			options := provisioning.Options{Provider: provisioning.Bicep}
-			if aliases {
-				options.Aliases = map[string]string{
-					"LOCAL_INPUT": "SHARED_INPUT", "LOCAL_OUTPUT": "SHARED_OUTPUT",
-				}
+			if configured {
+				options.Env = osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${SHARED_INPUT}")}
+				options.Outputs = map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"}
 			}
 			manager := provisioning.NewManager(
 				mockContext.Container, defaultProvider, layerManager, layerEnv,
@@ -564,7 +1262,7 @@ func TestCompat_ProviderKeepsDirectEnvironmentAccess(t *testing.T) {
 			_, err := manager.Deploy(t.Context())
 			require.NoError(t, err)
 			outputKey := "LOCAL_OUTPUT"
-			if aliases {
+			if configured {
 				outputKey = "SHARED_OUTPUT"
 				require.Empty(t, layerEnv.Getenv("LOCAL_OUTPUT"))
 			}
@@ -606,12 +1304,11 @@ func (p *mappedEnvironmentProvider) Destroy(
 	}, nil
 }
 
-// BACKCOMPAT: providers keep reading and writing names in the provider view; aliases are applied underneath them by the
-// manager. A provider must never need to know about aliases.
-func TestCompat_ProviderViewMapsToProjectView(t *testing.T) {
+func TestProviderInputsAndOutputMappingsAreIndependent(t *testing.T) {
 	backing := environment.NewWithValues("test-env", map[string]string{
 		"SHARED_INPUT": "input-value",
 		"LOCAL_OUTPUT": "unrelated-value",
+		"OUTPUT_INPUT": "input-side",
 	})
 	envManager := &mockenv.MockEnvManager{}
 	envManager.On("Save", mock.Anything, backing).Return(nil).Twice()
@@ -639,7 +1336,11 @@ func TestCompat_ProviderViewMapsToProjectView(t *testing.T) {
 	)
 	options := provisioning.Options{
 		Provider: provisioning.Bicep,
-		Aliases:  map[string]string{"LOCAL_INPUT": "SHARED_INPUT", "LOCAL_OUTPUT": "SHARED_OUTPUT"},
+		Env: osutil.ExpandableMap{
+			"LOCAL_INPUT":  osutil.NewExpandableString("${SHARED_INPUT}"),
+			"LOCAL_OUTPUT": osutil.NewExpandableString("${OUTPUT_INPUT}"),
+		},
+		Outputs: map[string]string{"LOCAL_OUTPUT": "SHARED_OUTPUT"},
 	}
 
 	require.NoError(t, manager.Initialize(t.Context(), "", options))
@@ -651,14 +1352,18 @@ func TestCompat_ProviderViewMapsToProjectView(t *testing.T) {
 	require.Equal(t, "output-value", backing.Getenv("SHARED_OUTPUT"),
 		"the provider's LOCAL_OUTPUT should be persisted as SHARED_OUTPUT")
 	require.Equal(t, "unrelated-value", backing.Getenv("LOCAL_OUTPUT"),
-		"writing the aliased output should not overwrite the backing LOCAL_OUTPUT")
+		"publishing the output should not overwrite the backing LOCAL_OUTPUT")
+	require.Equal(t, "input-side", provider.env.Getenv("LOCAL_OUTPUT"),
+		"an output mapping must not change the provider's input value")
 
 	_, err = manager.Destroy(t.Context(), provisioning.NewDestroyOptions(true, false))
 	require.NoError(t, err)
 	require.Empty(t, backing.Getenv("SHARED_OUTPUT"),
 		"invalidating the provider's LOCAL_OUTPUT should delete SHARED_OUTPUT")
 	require.Equal(t, "unrelated-value", backing.Getenv("LOCAL_OUTPUT"),
-		"destroying the aliased output should not delete the backing LOCAL_OUTPUT")
+		"destroying the output should not delete the backing LOCAL_OUTPUT")
+	require.Equal(t, "input-side", provider.env.Getenv("LOCAL_OUTPUT"))
+	require.Equal(t, "input-side", backing.Getenv("OUTPUT_INPUT"))
 	envManager.AssertExpectations(t)
 }
 
@@ -685,11 +1390,6 @@ func TestManagerDestroy_InvalidatesMappedOutput(t *testing.T) {
 		logicalKey:  "shared-value",
 		physicalKey: "layer-value",
 	})
-	scoped := &mappedOutputEnvironment{
-		ScopedEnvironment: backing,
-		logicalKey:        logicalKey,
-		physicalKey:       physicalKey,
-	}
 	provider := &destroyResultProvider{
 		result: &provisioning.DestroyResult{InvalidatedEnvKeys: []string{logicalKey}},
 	}
@@ -706,13 +1406,15 @@ func TestManagerDestroy_InvalidatesMappedOutput(t *testing.T) {
 		mockContext.Container,
 		defaultProvider,
 		envManager,
-		scoped,
+		backing,
 		mockContext.Console,
 		mockContext.AlphaFeaturesManager,
 		nil,
 		cloud.AzurePublic(),
 	)
-	require.NoError(t, mgr.Initialize(t.Context(), "", provisioning.Options{Provider: provisioning.Test}))
+	require.NoError(t, mgr.Initialize(t.Context(), "", provisioning.Options{
+		Provider: provisioning.Test, Outputs: map[string]string{logicalKey: physicalKey},
+	}))
 
 	_, err := mgr.Destroy(t.Context(), provisioning.NewDestroyOptions(true, false))
 
@@ -720,150 +1422,6 @@ func TestManagerDestroy_InvalidatesMappedOutput(t *testing.T) {
 	require.Equal(t, "shared-value", backing.Getenv(logicalKey))
 	require.Empty(t, backing.Getenv(physicalKey))
 	envManager.AssertExpectations(t)
-}
-
-type setupScopedEnvironment struct {
-	*environment.Environment
-}
-
-func (e *setupScopedEnvironment) GetSubscriptionId() string {
-	return "layer-subscription"
-}
-
-func (e *setupScopedEnvironment) GetLocation() string {
-	return "layer-location"
-}
-
-func TestEnsureSubscriptionAndLocation_UsesScopedValuesAndSavesBackingEnvironment(t *testing.T) {
-	t.Parallel()
-
-	backing := environment.NewWithValues("shared", map[string]string{
-		environment.SubscriptionIdEnvVarName: "backing-subscription",
-		environment.LocationEnvVarName:       "backing-location",
-	})
-	envManager := &mockenv.MockEnvManager{}
-	envManager.On("Save", mock.Anything, backing).Return(nil).Twice()
-
-	require.NoError(t, provisioning.EnsureSubscriptionAndLocation(
-		t.Context(), envManager, &setupScopedEnvironment{Environment: backing},
-		noPromptPrompter{}, provisioning.EnsureSubscriptionAndLocationOptions{},
-	))
-	require.Equal(t, "layer-subscription", backing.GetSubscriptionId())
-	require.Equal(t, "layer-location", backing.GetLocation())
-	envManager.AssertExpectations(t)
-}
-
-func TestEnsureSubscriptionAndLocation_NoPromptMissingSubscriptionReturnsPromptRequiredError(t *testing.T) {
-	env := environment.NewWithValues("test-env", nil)
-
-	err := provisioning.EnsureSubscriptionAndLocation(t.Context(), &mockenv.MockEnvManager{},
-		env,
-		noPromptPrompter{},
-		provisioning.EnsureSubscriptionAndLocationOptions{},
-	)
-	promptErr := requirePromptRequiredError(t, err, input.RequiredInput{
-		Name: "subscription",
-		Sources: []input.InputSource{
-			{
-				Kind: input.InputSourceEnvironment,
-				Name: environment.SubscriptionIdEnvVarName,
-			},
-		},
-	})
-
-	require.Contains(t, promptErr.ToString(""), environment.SubscriptionIdEnvVarName)
-}
-
-func TestEnsureSubscriptionAndLocation_NoPromptMissingLocationReturnsPromptRequiredError(t *testing.T) {
-	env := environment.NewWithValues("test-env", map[string]string{
-		environment.SubscriptionIdEnvVarName: "SUBSCRIPTION_ID",
-	})
-	envManager := &mockenv.MockEnvManager{}
-	envManager.On("Save", mock.Anything, env).Return(nil).Once()
-
-	err := provisioning.EnsureSubscriptionAndLocation(t.Context(), envManager,
-		env,
-		noPromptPrompter{},
-		provisioning.EnsureSubscriptionAndLocationOptions{},
-	)
-	promptErr := requirePromptRequiredError(t, err, input.RequiredInput{
-		Name: "location",
-		Sources: []input.InputSource{
-			{
-				Kind: input.InputSourceEnvironment,
-				Name: environment.LocationEnvVarName,
-			},
-		},
-	})
-
-	require.Contains(t, promptErr.ToString(""), environment.LocationEnvVarName)
-	envManager.AssertExpectations(t)
-}
-
-func TestEnsureSubscription_NoPromptMissingSubscriptionReturnsPromptRequiredError(t *testing.T) {
-	env := environment.NewWithValues("test-env", nil)
-
-	err := provisioning.EnsureSubscription(t.Context(), &mockenv.MockEnvManager{},
-		env,
-		noPromptPrompter{},
-	)
-	requirePromptRequiredError(t, err, input.RequiredInput{
-		Name: "subscription",
-		Sources: []input.InputSource{
-			{
-				Kind: input.InputSourceEnvironment,
-				Name: environment.SubscriptionIdEnvVarName,
-			},
-		},
-	})
-}
-
-type noPromptPrompter struct{}
-
-func (p noPromptPrompter) PromptSubscription(ctx context.Context, msg string) (string, error) {
-	panic("unexpected PromptSubscription call")
-}
-
-func (p noPromptPrompter) PromptLocation(
-	ctx context.Context,
-	subId string,
-	msg string,
-	filter prompt.LocationFilterPredicate,
-	defaultLocation *string,
-) (string, error) {
-	panic("unexpected PromptLocation call")
-}
-
-func (p noPromptPrompter) PromptResourceGroup(ctx context.Context, options prompt.PromptResourceOptions) (string, error) {
-	panic("unexpected PromptResourceGroup call")
-}
-
-func (p noPromptPrompter) PromptResourceGroupFrom(
-	ctx context.Context,
-	subscriptionId string,
-	location string,
-	options prompt.PromptResourceGroupFromOptions,
-) (string, error) {
-	panic("unexpected PromptResourceGroupFrom call")
-}
-
-func (p noPromptPrompter) IsNoPromptMode() bool {
-	return true
-}
-
-func requirePromptRequiredError(
-	t *testing.T,
-	err error,
-	expectedInput input.RequiredInput,
-) *input.PromptRequiredError {
-	t.Helper()
-
-	promptErr, ok := errors.AsType[*input.PromptRequiredError](err)
-	require.True(t, ok)
-	require.Equal(t, []input.RequiredInput{expectedInput}, promptErr.Inputs)
-	require.Contains(t, promptErr.ToString(""), input.DefaultPromptRequiredMessage)
-
-	return promptErr
 }
 
 func registerContainerDependencies(

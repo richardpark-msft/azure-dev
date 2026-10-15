@@ -180,17 +180,16 @@ func mergeProjectVariablesAndSecrets(
 					parameter.Name, parameter.Name)
 		}
 
-		if envVarsCount > 1 || parameter.Value == nil {
-			// for parameters mapped to multiple env vars, or without a resolved value,
-			// each env var becomes either a variable or a secret
+		if envVarsCount > 1 || parameter.Value == nil || (!parameter.LocalPrompt && !parameter.UsingEnvVarMapping) {
+			// Derived parameters need their original sources, not a value already transformed by the provider.
 			for _, envVar := range parameter.EnvVarMapping {
 				// see if the env var is set in the system env or azd env
 				// NOTE: provider parameters have access to system env vars but not project env vars/secrets.
-				value := env[envVar]
-				if value == "" {
-					value = os.Getenv(envVar)
+				value, present := env[envVar]
+				if !present {
+					value, present = os.LookupEnv(envVar)
 				}
-				if value == "" {
+				if !present {
 					// env var not set, ignore it
 					continue
 				}
@@ -207,10 +206,6 @@ func mergeProjectVariablesAndSecrets(
 		// Param mapped to a single env var, use that ENV VAR to set the link in CI
 		// marshall the value to a string
 		envVar := parameter.EnvVarMapping[0]
-		if !parameter.LocalPrompt && !parameter.UsingEnvVarMapping {
-			//For non-prompt params, use it only if the env var mapping is defined.
-			continue
-		}
 		// At this point, either LocalPrompt is true or the env var is set.
 		// This means we have what we need to set the variable in CI as string.
 		strValue := fmt.Sprintf("%v", parameter.Value)
@@ -223,16 +218,17 @@ func mergeProjectVariablesAndSecrets(
 
 	// Last override is based on the user explicitly defined variables and secrets
 	for key, value := range env {
-		if value == "" {
-			// skip empty values
-			continue
-		}
 		if slices.Contains(projectVariables, key) {
 			variables[key] = value
 		}
 		if slices.Contains(projectSecrets, key) {
 			secrets[key] = value
 		}
+	}
+
+	// An input source may feed several parameters. If any use is secret, never also publish it as a variable.
+	for name := range secrets {
+		delete(variables, name)
 	}
 
 	// Escape values for safe transmission to pipeline providers.

@@ -217,6 +217,7 @@ func Test_ConfigOptions_ProviderParameterWithNilValueSkipsUnsetMappedEnvVar(t *t
 	const envVarName = "AZD_TEST_UNSET_REAL_SECRET"
 
 	t.Setenv(envVarName, "")
+	require.NoError(t, os.Unsetenv(envVarName))
 
 	providerParameters := []provisioning.Parameter{
 		{
@@ -6166,7 +6167,7 @@ func Test_mergeProjectVariablesAndSecrets_usingEnvVarMapping(t *testing.T) {
 		assert.False(t, hasOther)
 	})
 
-	t.Run("empty env values are skipped", func(t *testing.T) {
+	t.Run("explicit empty env values are preserved", func(t *testing.T) {
 		t.Parallel()
 		vars, _, err := mergeProjectVariablesAndSecrets(
 			[]string{"PROJ_VAR"}, nil,
@@ -6174,8 +6175,9 @@ func Test_mergeProjectVariablesAndSecrets_usingEnvVarMapping(t *testing.T) {
 			nil,
 			map[string]string{"PROJ_VAR": ""})
 		require.NoError(t, err)
-		_, hasVar := vars["PROJ_VAR"]
-		assert.False(t, hasVar)
+		value, hasVar := vars["PROJ_VAR"]
+		assert.True(t, hasVar)
+		assert.Empty(t, value)
 	})
 
 	t.Run("initial variables are preserved", func(t *testing.T) {

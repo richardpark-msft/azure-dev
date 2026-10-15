@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/azure/azure-dev/cli/azd/pkg/infra/provisioning"
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -120,7 +121,7 @@ func TestAnalyzeLayerDependencies_LinearChain(t *testing.T) {
 	require.Equal(t, [][]int{{0}, {1}}, result.Levels)
 }
 
-func TestAnalyzeLayerDependencies_AliasedInputsAndOutputs(t *testing.T) {
+func TestAnalyzeLayerDependencies_ExplicitInputsAndMappedOutputs(t *testing.T) {
 	dir := t.TempDir()
 
 	producerDir := filepath.Join(dir, "producer")
@@ -139,13 +140,13 @@ func TestAnalyzeLayerDependencies_AliasedInputsAndOutputs(t *testing.T) {
 			Name:    "producer",
 			Path:    "producer",
 			Module:  "main",
-			Aliases: map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT"},
+			Outputs: map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT"},
 		},
 		{
-			Name:    "consumer",
-			Path:    "consumer",
-			Module:  "main",
-			Aliases: map[string]string{"LOCAL_INPUT": "SHARED_ENDPOINT"},
+			Name:   "consumer",
+			Path:   "consumer",
+			Module: "main",
+			Env:    osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${SHARED_ENDPOINT}")},
 		},
 	}
 
@@ -153,6 +154,102 @@ func TestAnalyzeLayerDependencies_AliasedInputsAndOutputs(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, [][]int{{0}, {1}}, result.Levels)
+}
+
+func TestAnalyzeLayerDependencies_InputOverrides(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       osutil.ExpandableMap
+		producers []int
+	}{
+		{name: "parameter reference without override", producers: []int{0}},
+		{
+			name: "literal shadows parameter reference",
+			env:  osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("fixed")},
+		},
+		{
+			name: "empty shadows parameter reference",
+			env:  osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("")},
+		},
+		{
+			name: "bare name is a literal",
+			env:  osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("SHARED_INPUT")},
+		},
+		{
+			name:      "reference replaces parameter dependency",
+			env:       osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${SHARED_INPUT}")},
+			producers: []int{2},
+		},
+		{
+			name: "composite and repeated references",
+			env: osutil.ExpandableMap{
+				"LOCAL_INPUT": osutil.NewExpandableString("https://${SECOND_INPUT}/${SHARED_INPUT}/${SECOND_INPUT}"),
+				"UNUSED":      osutil.NewExpandableString("${SHARED_INPUT}"),
+			},
+			producers: []int{1, 2},
+		},
+		{
+			name:      "nested default references",
+			env:       osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("${EXTERNAL_INPUT:-${SHARED_INPUT}}")},
+			producers: []int{2},
+		},
+		{
+			name: "source names are not chained through input overrides",
+			env: osutil.ExpandableMap{
+				"LOCAL_INPUT":  osutil.NewExpandableString("${SECOND_INPUT}"),
+				"SECOND_INPUT": osutil.NewExpandableString("fixed"),
+			},
+			producers: []int{1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			layers := make([]provisioning.Options, 0, 4)
+			for _, name := range []string{"LOCAL_INPUT", "SECOND_INPUT", "SHARED_INPUT"} {
+				mkTestDir(t, filepath.Join(dir, name))
+				writeTestFile(t, filepath.Join(dir, name, "main.bicep"),
+					"output "+name+" string = 'value'\n")
+				layers = append(layers, provisioning.Options{Name: name, Path: name, Module: "main"})
+			}
+			mkTestDir(t, filepath.Join(dir, "consumer"))
+			writeTestFile(t, filepath.Join(dir, "consumer", "main.bicep"), "param input string\n")
+			writeTestFile(t, filepath.Join(dir, "consumer", "main.parameters.json"),
+				`{"parameters":{"input":{"value":"${LOCAL_INPUT}"}}}`)
+			layers = append(layers, provisioning.Options{
+				Name: "consumer", Path: "consumer", Module: "main", Env: tt.env,
+			})
+
+			result, err := AnalyzeLayerDependencies(t.Context(), layers, dir)
+			require.NoError(t, err)
+			require.ElementsMatch(t, tt.producers, result.Edges[3])
+			require.Len(t, result.Edges[3], len(tt.producers), "repeated references must not duplicate edges")
+		})
+	}
+}
+
+func TestAnalyzeLayerDependencies_TerraformEnvConsumesMappedBicepOutput(t *testing.T) {
+	dir := t.TempDir()
+	mkTestDir(t, filepath.Join(dir, "producer"))
+	mkTestDir(t, filepath.Join(dir, "consumer"))
+	writeTestFile(t, filepath.Join(dir, "producer", "main.bicep"),
+		"output LOCAL_ENDPOINT string = 'endpoint'\n")
+	writeTestFile(t, filepath.Join(dir, "consumer", "main.tf"), "terraform {}\n")
+
+	layers := []provisioning.Options{
+		{
+			Name: "producer", Path: "producer", Module: "main", Provider: provisioning.Bicep,
+			Outputs: map[string]string{"LOCAL_ENDPOINT": "SHARED_ENDPOINT", "SHARED_ENDPOINT": "OTHER_ENDPOINT"},
+		},
+		{
+			Name: "consumer", Path: "consumer", Module: "main", Provider: provisioning.Terraform,
+			Env: osutil.ExpandableMap{"LOCAL_INPUT": osutil.NewExpandableString("https://${SHARED_ENDPOINT:-fallback}/api")},
+		},
+	}
+	result, err := AnalyzeLayerDependencies(t.Context(), layers, dir)
+	require.NoError(t, err)
+	require.Equal(t, [][]int{{0}, {1}}, result.Levels)
+	require.Equal(t, []int{0}, result.Edges[1])
 }
 
 func TestAnalyzeLayerDependencies_Diamond(t *testing.T) {
@@ -380,17 +477,24 @@ func TestExtractParamEnvRefs(t *testing.T) {
 			filePath: "main.parameters.json",
 			content:  `{"parameters":{"p1":{"value":"literal"}}}`,
 		},
+		{
+			name:     "composite and nested default references",
+			filePath: "main.parameters.json",
+			content:  `{"parameters":{"p1":{"value":"https://${HOST:-${FALLBACK_HOST}}/${PATH_PREFIX}"}}}`,
+			expected: []string{"HOST", "FALLBACK_HOST", "PATH_PREFIX"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _ := extractParamEnvRefs(
+			got, hasUnknown := extractParamEnvRefs(
 				tt.filePath, []byte(tt.content),
 			)
+			require.False(t, hasUnknown)
 			if tt.expected == nil {
 				require.Empty(t, got)
 			} else {
-				require.Equal(t, tt.expected, got)
+				require.ElementsMatch(t, tt.expected, got)
 			}
 		})
 	}
@@ -855,8 +959,8 @@ func TestExtractBicepParamReadEnvRefs_IgnoresComments(t *testing.T) {
 // --- Non-Bicep (Terraform/Pulumi) layer support ---
 
 // TestAnalyzeLayerDependencies_TerraformLayers verifies that Terraform layers
-// are skipped by the Bicep-specific output/input analysis (no .bicep files
-// required) and that explicit dependsOn edges are still honored.
+// need no Bicep files for source analysis and that explicit dependsOn edges
+// are still honored. Declared env expressions are analyzed separately.
 func TestAnalyzeLayerDependencies_TerraformLayers(t *testing.T) {
 	dir := t.TempDir()
 
@@ -913,8 +1017,8 @@ func TestAnalyzeLayerDependencies_TerraformLayersParallel(t *testing.T) {
 
 // TestAnalyzeLayerDependencies_MixedProviders verifies that a project with
 // both Bicep and Terraform layers works: Bicep layers get static analysis,
-// Terraform layers are skipped for output/input scanning, and dependsOn
-// edges connect them correctly.
+// Terraform source files remain opaque, and dependsOn edges connect them
+// correctly.
 func TestAnalyzeLayerDependencies_MixedProviders(t *testing.T) {
 	dir := t.TempDir()
 

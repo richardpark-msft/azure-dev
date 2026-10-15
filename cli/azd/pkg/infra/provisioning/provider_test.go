@@ -7,17 +7,18 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/osutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestApplyOutputAliases(t *testing.T) {
+func TestApplyOutputMappings(t *testing.T) {
 	outputs := map[string]OutputParameter{
 		"LOCAL_OUTPUT": {Type: ParameterTypeString, Value: "value"},
 		"UNCHANGED":    {Type: ParameterTypeString, Value: "other"},
 	}
 
-	mapped, err := ApplyOutputAliases(outputs, map[string]string{
+	mapped, err := ApplyOutputMappings(outputs, map[string]string{
 		"LOCAL_OUTPUT": "SHARED_OUTPUT",
 	})
 
@@ -27,18 +28,95 @@ func TestApplyOutputAliases(t *testing.T) {
 	require.NotContains(t, mapped, "LOCAL_OUTPUT")
 }
 
-func TestApplyOutputAliasesRejectsDuplicateDestinations(t *testing.T) {
-	outputs := map[string]OutputParameter{
-		"FIRST":  {Type: ParameterTypeString, Value: "one"},
-		"SECOND": {Type: ParameterTypeString, Value: "two"},
+func TestEnvReferences(t *testing.T) {
+	t.Parallel()
+
+	options := Options{Env: osutil.ExpandableMap{
+		"COMPOSITE": osutil.NewExpandableString("${FIRST}/${SECOND}/${FIRST}"),
+		"DEFAULTED": osutil.NewExpandableString("${FIRST:-${SECOND}}"),
+		"LITERAL":   osutil.NewExpandableString("value"),
+		"ESCAPED":   osutil.NewExpandableString("$${NOT_A_REFERENCE}"),
+	}}
+	for _, tt := range []struct {
+		name string
+		want []string
+	}{
+		{name: "COMPOSITE", want: []string{"FIRST", "SECOND"}},
+		{name: "DEFAULTED", want: []string{"FIRST", "SECOND"}},
+		{name: "LITERAL"},
+		{name: "ESCAPED"},
+		{name: "UNCHANGED", want: []string{"UNCHANGED"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sources, err := options.EnvReferences(tt.name)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, sources)
+		})
+	}
+}
+
+func TestApplyOutputMappingsRejectsDuplicateDestinations(t *testing.T) {
+	tests := []struct {
+		name     string
+		outputs  map[string]OutputParameter
+		mappings map[string]string
+		wantErr  string
+	}{
+		{
+			name: "same output destination",
+			outputs: map[string]OutputParameter{
+				"FIRST":  {Type: ParameterTypeString, Value: "one"},
+				"SECOND": {Type: ParameterTypeString, Value: "two"},
+			},
+			mappings: map[string]string{
+				"FIRST":  "SHARED",
+				"SECOND": "SHARED",
+			},
+			wantErr: `provider outputs "FIRST" and "SECOND" both target project variable "SHARED"`,
+		},
+		{
+			name: "output destinations differ only by case",
+			outputs: map[string]OutputParameter{
+				"FIRST":  {Type: ParameterTypeString, Value: "one"},
+				"SECOND": {Type: ParameterTypeString, Value: "two"},
+			},
+			mappings: map[string]string{
+				"FIRST":  "SHARED",
+				"SECOND": "shared",
+			},
+			wantErr: `provider outputs "FIRST" and "SECOND" both target project variable "shared"`,
+		},
+		{
+			name: "output mapping collides with unmapped output by case",
+			outputs: map[string]OutputParameter{
+				"FIRST":  {Type: ParameterTypeString, Value: "one"},
+				"SHARED": {Type: ParameterTypeString, Value: "two"},
+			},
+			mappings: map[string]string{
+				"FIRST": "shared",
+			},
+			wantErr: `provider outputs "FIRST" and "SHARED" both target project variable "SHARED"`,
+		},
+		{
+			name: "unmapped outputs differ only by case",
+			outputs: map[string]OutputParameter{
+				"OUTPUT": {Type: ParameterTypeString, Value: "one"},
+				"output": {Type: ParameterTypeString, Value: "two"},
+			},
+			wantErr: `provider outputs "OUTPUT" and "output" both target project variable "output"`,
+		},
 	}
 
-	_, err := ApplyOutputAliases(outputs, map[string]string{
-		"FIRST":  "SHARED",
-		"SECOND": "SHARED",
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.ErrorContains(t, err, `provider outputs "FIRST" and "SECOND" both target project variable "SHARED"`)
+			_, err := ApplyOutputMappings(tt.outputs, tt.mappings)
+
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestOptions_GetWithDefaults(t *testing.T) {
